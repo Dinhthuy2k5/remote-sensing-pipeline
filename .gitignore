@@ -1,0 +1,20 @@
+# Build
+cpp-core/build/
+
+# Data lớn
+data/samples/*.tif
+data/samples/*.tiff
+
+# Env
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Docker volumes
+volumes/
+
+# Node
+frontend/node_modules/

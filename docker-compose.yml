@@ -1,0 +1,71 @@
+services:
+  cpp-core:
+    build:
+      context: ./cpp-core
+      dockerfile: Dockerfile
+    container_name: rs_cpp_core
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "${UDP_PORT:-9090}:9090/udp"
+    volumes:
+      - session_storage:/tmp/sessions
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgis}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_DB=${POSTGRES_DB:-remote_sensing}
+      - POSTGRES_USER=${POSTGRES_USER:-rsuser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-rspassword}
+      - SESSION_STORAGE_PATH=/tmp/sessions
+      - TILE_SIZE=${TILE_SIZE:-512}
+      - TILE_OVERLAP=${TILE_OVERLAP:-64}
+      - UDP_PORT=${UDP_PORT:-9090}
+      - UDP_BROADCAST_INTERVAL_MS=${UDP_BROADCAST_INTERVAL_MS:-500}
+    depends_on:
+      postgis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rs_network
+
+  postgis:
+    image: postgis/postgis:15-3.3
+    container_name: rs_postgis
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-remote_sensing}
+      - POSTGRES_USER=${POSTGRES_USER:-rsuser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-rspassword}
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rsuser} -d ${POSTGRES_DB:-remote_sensing}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rs_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rs_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - API_BASE_URL=http://localhost:${HTTP_PORT:-8080}
+      - UDP_PORT=${UDP_PORT:-9090}
+    depends_on:
+      - cpp-core
+    networks:
+      - rs_network
+
+volumes:
+  postgis_data:
+  session_storage:
+
+networks:
+  rs_network:
+    driver: bridge
