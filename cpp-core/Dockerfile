@@ -19,7 +19,7 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
 FROM osgeo/gdal:ubuntu-small-3.6.3
 
 RUN apt-get update && apt-get install -y \
-    libpqxx-7.7 \
+    libpqxx-6.4 \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
