@@ -7,14 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ─── Dependencies ─────────────────────────────────────────────
 find_package(GDAL REQUIRED)
 find_package(Threads REQUIRED)
-
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PQXX REQUIRED libpqxx)
 
-# ─── Sources ──────────────────────────────────────────────────
-file(GLOB_RECURSE SOURCES "src/*.cpp")
+# ─── Main executable ──────────────────────────────────────────
+file(GLOB_RECURSE MAIN_SOURCES "src/*.cpp")
 
-add_executable(rs_pipeline ${SOURCES})
+add_executable(rs_pipeline ${MAIN_SOURCES})
 
 target_include_directories(rs_pipeline PRIVATE
     src/
@@ -29,3 +28,14 @@ target_link_libraries(rs_pipeline PRIVATE
 )
 
 target_compile_options(rs_pipeline PRIVATE -Wall -Wextra)
+
+# ─── Test executable ──────────────────────────────────────────
+add_executable(test_state_machine
+    tests/test_state_machine.cpp
+    src/pipeline/state_machine.cpp
+    src/common/logger.hpp         # header only
+)
+
+target_include_directories(test_state_machine PRIVATE src/)
+target_link_libraries(test_state_machine PRIVATE Threads::Threads)
+target_compile_options(test_state_machine PRIVATE -Wall -Wextra)
