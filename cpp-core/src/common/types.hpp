@@ -26,16 +26,38 @@ namespace rs
 
     // ─── Tile ─────────────────────────────────────────────────────
     struct TileData
-    // Đây là "gói hàng" (payload) mà Tiling Engine sẽ đẩy vào Hàng đợi (Queue) để các Worker xử lý.
     {
+        // Vị trí trong grid
         int tile_row;
         int tile_col;
-        int pixel_x_offset; // offset từ góc trên trái ảnh gốc
+        int tile_index; // row * grid_cols + col, dùng để sort kết quả
+
+        // Vị trí trong ảnh gốc (pixel)
+        int pixel_x_offset;
         int pixel_y_offset;
+
+        // Kích thước thực tế (có thể nhỏ hơn tile_size ở biên)
         int width;
         int height;
-        std::vector<uint8_t> pixels; // raw pixel buffer
+        int band_count;
+
+        // Pixel buffer — interleaved HWC format
+        // pixels[y * width * band_count + x * band_count + b]
+        std::vector<uint8_t> pixels;
+
+        // Session context
         int64_t session_id;
+
+        // Helper: tính size kỳ vọng của buffer
+        size_t expectedBufferSize() const
+        {
+            return (size_t)width * height * band_count;
+        }
+
+        bool isValid() const
+        {
+            return width > 0 && height > 0 && band_count > 0 && pixels.size() == expectedBufferSize();
+        }
     };
 
     // ─── Geo ──────────────────────────────────────────────────────
@@ -54,6 +76,7 @@ namespace rs
         int class_id;
         float confidence;
         int64_t session_id;
+        int tile_index; // để trace về tile gốc
     };
 
     // ─── Session ──────────────────────────────────────────────────
