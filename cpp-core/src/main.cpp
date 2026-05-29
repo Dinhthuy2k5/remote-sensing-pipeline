@@ -2,9 +2,11 @@
 #include "common/types.hpp"
 #include "pipeline/tiling_engine.hpp"
 #include "pipeline/thread_pool.hpp"
+#include "inference/mock_ai.hpp"
 #include <iostream>
 #include <atomic>
-#include <thread>
+#include <mutex>
+#include <vector>
 
 int main(int argc, char *argv[])
 {
@@ -12,87 +14,75 @@ int main(int argc, char *argv[])
 
     std::string filepath = (argc > 1) ? argv[1] : "/app/data/test.tif";
 
-    // ─── Validate file ────────────────────────────────────────
+    // ─── Validate ─────────────────────────────────────────────
     std::string err;
     if (!rs::TilingEngine::validateFile(filepath, err))
     {
-        LOG_ERROR("main", "Validation failed: " + err);
+        LOG_ERROR("main", err);
         return 1;
     }
-    LOG_INFO("main", "File validated OK.");
 
     // ─── Tiling Engine ────────────────────────────────────────
     rs::TilingEngine engine(512, 64);
-
     engine.setProgressCallback([](int done, int total)
                                {
-        if (done % 20 == 0 || done == total) {
-            LOG_INFO("Progress",
-                std::to_string(done) + "/" + std::to_string(total)
-                + " tiles read ("
-                + std::to_string(done * 100 / total) + "%)");
-        } });
+        if (done % 40 == 0 || done == total)
+            LOG_INFO("Progress", std::to_string(done)
+                + "/" + std::to_string(total)); });
 
     if (!engine.open(filepath))
-    {
-        LOG_ERROR("main", "Failed to open GeoTIFF.");
         return 1;
-    }
 
-    // ─── Thread Pool ──────────────────────────────────────────
+    // ─── MockAI — 1 instance per worker thread ────────────────
+    // Mỗi worker có AI riêng → không share state → không cần mutex
     rs::ThreadPool pool;
-    std::atomic<int> processed{0};
 
-    pool.start([&processed](rs::TileData &tile)
+    std::atomic<int> total_detections{0};
+    std::mutex results_mutex;
+    std::vector<rs::Detection> all_detections; // gom kết quả
+
+    pool.start([&](rs::TileData &tile)
                {
-        // Validate TileData struct đầy đủ
-        if (!tile.isValid()) {
-            LOG_ERROR("Worker", "Invalid tile at ("
-                + std::to_string(tile.tile_row) + ","
-                + std::to_string(tile.tile_col) + ")");
-            return;
+        // Mỗi lambda call là 1 thread riêng
+        // MockAI tạo trên stack → thread-local, không race
+        rs::MockAI ai(3, 42);
+
+        auto detections = ai.infer(tile);
+
+        // Ghi vào shared vector — cần lock
+        {
+            std::lock_guard<std::mutex> lock(results_mutex);
+            for (auto& d : detections) {
+                all_detections.push_back(d);
+            }
         }
 
-        // TODO Ngày 10-11: thay bằng MockAI::infer(tile)
-        LOG_DEBUG("Worker",
-            "tile_index=" + std::to_string(tile.tile_index)
-            + " (" + std::to_string(tile.tile_row)
-            + "," + std::to_string(tile.tile_col) + ")"
-            + " " + std::to_string(tile.width)
-            + "x" + std::to_string(tile.height)
-            + "x" + std::to_string(tile.band_count)
-            + " buf=" + std::to_string(tile.pixels.size()) + "B");
-        processed++; });
+        total_detections += (int)detections.size(); });
 
     // ─── Producer ─────────────────────────────────────────────
-    LOG_INFO("main", "Starting tile producer...");
-
-    engine.iterateTiles(/*session_id=*/1, [&pool](rs::TileData tile)
+    LOG_INFO("main", "Starting pipeline...");
+    engine.iterateTiles(1, [&pool](rs::TileData tile)
                         { pool.submit(std::move(tile)); });
-
-    LOG_INFO("main", "All tiles submitted: " + std::to_string(pool.tilesSubmitted()));
 
     pool.waitAll();
 
     // ─── Summary ──────────────────────────────────────────────
-    std::cout << "\n=== SUMMARY ===\n";
-    std::cout << "Total tiles : " << engine.totalTiles() << "\n";
-    std::cout << "Submitted   : " << pool.tilesSubmitted() << "\n";
-    std::cout << "Processed   : " << processed.load() << "\n";
+    std::cout << "\n=== PIPELINE SUMMARY ===\n";
+    std::cout << "Tiles processed : " << pool.tilesProcessed() << "\n";
+    std::cout << "Total detections: " << total_detections.load() << "\n";
 
-    // Test tileToGeoPolygon trên tile (0,0)
-    rs::TileData sample;
-    if (engine.readTile(0, 0, 1, sample))
+    // Sample 5 detection đầu tiên
+    std::cout << "\n=== SAMPLE DETECTIONS (first 5) ===\n";
+    const char *class_names[] = {"vegetation", "water", "building", "road"};
+    int show = std::min(5, (int)all_detections.size());
+    for (int i = 0; i < show; i++)
     {
-        auto polygon = engine.tileToGeoPolygon(sample);
-        std::cout << "\n=== TILE (0,0) GEO POLYGON ===\n";
-        const char *corners[] = {"TL", "TR", "BR", "BL"};
-        for (int i = 0; i < 4; i++)
-        {
-            std::cout << corners[i] << ": lat=" << polygon[i].lat
-                      << " lon=" << polygon[i].lon << "\n";
-        }
-        std::cout << "(Note: UTM coords - reproject to WGS84 on Day 12-13)\n";
+        const auto &d = all_detections[i];
+        std::cout << "  class=" << class_names[d.class_id]
+                  << " conf=" << d.confidence
+                  << " bbox=(" << d.bbox.x << "," << d.bbox.y
+                  << " " << d.bbox.width << "x" << d.bbox.height
+                  << ")\n";
     }
 
     engine.close();
