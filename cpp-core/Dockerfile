@@ -29,4 +29,4 @@ COPY --from=builder /app/build/rs_pipeline .
 EXPOSE 8080
 EXPOSE 9090/udp
 
-CMD ["./rs_pipeline"]
+CMD ["./rs_pipeline", "/app/data/test.tif"]

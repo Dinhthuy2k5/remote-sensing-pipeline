@@ -9,6 +9,7 @@ services:
       - "${UDP_PORT:-9090}:9090/udp"
     volumes:
       - session_storage:/tmp/sessions
+      - ./data/samples:/app/data
     environment:
       - POSTGRES_HOST=${POSTGRES_HOST:-postgis}
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
@@ -23,7 +24,7 @@ services:
     depends_on:
       postgis:
         condition: service_healthy
-    restart: unless-stopped
+    restart: no
     networks:
       - rs_network
 
@@ -40,7 +41,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rsuser} -d ${POSTGRES_DB:-remote_sensing}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rsuser} -d ${POSTGRES_DB:-remote_sensing}" ]
       interval: 5s
       timeout: 5s
       retries: 5
