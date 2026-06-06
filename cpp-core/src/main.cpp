@@ -7,6 +7,7 @@
 #include "database/postgis_client.hpp"
 #include "inference/mock_ai.hpp"
 #include "api/http_gateway.hpp"
+#include "monitoring/udp_broadcaster.hpp"
 #include <iostream>
 #include <atomic>
 #include <mutex>
@@ -210,6 +211,45 @@ int main()
     // Session Manager
     SessionManager sessions;
 
+    // ─── UDP Broadcaster ──────────────────────────────────────────
+    int udp_port = 9090;
+    if (const char *p = std::getenv("UDP_PORT"))
+        udp_port = std::stoi(p);
+
+    int udp_interval = 500;
+    if (const char *p = std::getenv("UDP_BROADCAST_INTERVAL_MS"))
+        udp_interval = std::stoi(p);
+
+    rs::UdpBroadcaster broadcaster(udp_port, udp_interval);
+
+    // active_session_id — track session đang chạy
+    std::atomic<int64_t> active_session_id{-1};
+
+    broadcaster.setMetricsProvider([&]() -> rs::SystemMetrics
+                                   {
+    rs::SystemMetrics m;
+
+    int64_t sid = active_session_id.load();
+    if (sid < 0) {
+        m.state = "IDLE";
+        return m;
+    }
+
+    rs::SessionInfo info = sessions.getInfo(sid);
+
+    static const char* state_names[] = {
+        "IDLE","LOADING","TILING","PROCESSING",
+        "STITCHING","SAVING","DONE","ERROR","RECOVERING"
+    };
+    m.session_id  = info.id;
+    m.state       = state_names[(int)info.status];
+    m.tiles_done  = info.tile_done;
+    m.tiles_total = info.tile_total;
+
+    return m; });
+
+    broadcaster.start();
+
     // HTTP Gateway
     int port = 8080;
     if (const char *p = std::getenv("HTTP_PORT"))
@@ -256,25 +296,30 @@ int main()
 
     gateway.onStart([&](int64_t sid) -> bool
                     {
-        auto ctx = sessions.get(sid);
-        if (!ctx) return false;
+    auto ctx = sessions.get(sid);
+    if (!ctx) return false;
 
-        {
-            std::lock_guard<std::mutex> lock(ctx->mutex);
-            if (ctx->info.status != rs::SessionStatus::IDLE) {
-                LOG_WARN("main", "Session " + std::to_string(sid)
-                    + " already started.");
-                return false;
-            }
-            ctx->info.status = rs::SessionStatus::LOADING;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        if (ctx->info.status != rs::SessionStatus::IDLE) {
+            LOG_WARN("main", "Session " + std::to_string(sid)
+                + " already started.");
+            return false;
         }
+        ctx->info.status = rs::SessionStatus::LOADING;
+    }
 
-        // Chạy pipeline trong thread riêng — không block HTTP
-        std::thread([ctx, &db]() {
-            runPipelineAsync(ctx, db);
-        }).detach();
+    active_session_id.store(sid);
 
-        return true; });
+    std::thread([ctx, &db, &active_session_id]() {
+        runPipelineAsync(ctx, db);
+
+        // Giữ session_id thêm 3 giây để broadcaster kịp gửi DONE
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        active_session_id.store(-1);
+    }).detach();
+
+    return true; });
 
     gateway.onCancel([&](int64_t sid) -> bool
                      {
