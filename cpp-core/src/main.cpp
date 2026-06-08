@@ -8,6 +8,7 @@
 #include "inference/mock_ai.hpp"
 #include "api/http_gateway.hpp"
 #include "monitoring/udp_broadcaster.hpp"
+#include "stitching/stitcher.hpp"
 #include <iostream>
 #include <atomic>
 #include <mutex>
@@ -158,26 +159,39 @@ void runPipelineAsync(
 
     engine.iterateTiles(session_id, [&](rs::TileData tile)
                         { ctx->pool->submit(std::move(tile)); });
+    // ─── Fan-In point: tất cả Worker đã xong ─────────────────────
     ctx->pool->waitAll();
 
+    // ─── Stitching: 1 luồng, global view ─────────────────────────
     {
-        std::lock_guard<std::mutex> lock(ctx->mutex);
+        std::lock_guard<std::mutex> lk(ctx->mutex);
+        ctx->info.status = rs::SessionStatus::STITCHING;
+    }
+
+    rs::Stitcher stitcher(0.5f);
+    auto final_dets = stitcher.runNMS(all_geo_dets);
+
+    // ─── Save to PostGIS ──────────────────────────────────────────
+    {
+        std::lock_guard<std::mutex> lk(ctx->mutex);
         ctx->info.status = rs::SessionStatus::SAVING;
     }
 
     if (db.isConnected())
     {
-        db.insertDetections(all_geo_dets);
+        db.insertDetections(final_dets);
         db.updateSessionStatus(session_id, rs::SessionStatus::DONE);
     }
 
     {
-        std::lock_guard<std::mutex> lock(ctx->mutex);
+        std::lock_guard<std::mutex> lk(ctx->mutex);
         ctx->info.status = rs::SessionStatus::DONE;
         ctx->info.tile_done = ctx->info.tile_total;
     }
 
-    LOG_INFO("Pipeline", "Session " + std::to_string(session_id) + " DONE. Detections: " + std::to_string(all_geo_dets.size()));
+    LOG_INFO("Pipeline",
+             "Session " + std::to_string(session_id) + " DONE. Detections: " + std::to_string(final_dets.size()) + "/" + std::to_string(all_geo_dets.size()) + " (after NMS)");
+
     engine.close();
 }
 
