@@ -12,29 +12,46 @@ namespace rs
     class ThreadSafeQueue
     {
     public:
-        // Push item vào queue, notify 1 worker đang chờ
-        void push(T item)
+        // capacity = 0 → unbounded (giữ backward compat)
+        explicit ThreadSafeQueue(size_t capacity = 0)
+            : capacity_(capacity)
         {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                queue_.push(std::move(item));
-            }
-            cv_.notify_one();
+        }
+
+        // Push item vào queue, block nếu queue đầy, notify 1 worker đang chờ
+        bool push(T item)
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+
+            // Chờ cho đến khi còn chỗ hoặc queue bị đóng
+            cv_not_full_.wait(lock, [this]
+                              { return closed_ || capacity_ == 0 || queue_.size() < capacity_; });
+
+            if (closed_)
+                return false;
+
+            queue_.push(std::move(item));
+            cv_not_empty_.notify_one();
+            return true;
         }
 
         // Pop blocking — chờ cho đến khi có item hoặc queue bị đóng
         // Trả std::nullopt nếu queue đã closed và rỗng
+        // Pop — block cho đến khi có item hoặc queue đóng
         std::optional<T> pop()
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this]
-                     { return !queue_.empty() || closed_; });
+            cv_not_empty_.wait(lock, [this]
+                               { return !queue_.empty() || closed_; });
 
             if (queue_.empty())
                 return std::nullopt;
 
             T item = std::move(queue_.front());
             queue_.pop();
+
+            // Notify producer đang chờ chỗ trống
+            cv_not_full_.notify_one();
             return item;
         }
 
@@ -45,7 +62,8 @@ namespace rs
                 std::lock_guard<std::mutex> lock(mutex_);
                 closed_ = true;
             }
-            cv_.notify_all();
+            cv_not_empty_.notify_all();
+            cv_not_full_.notify_all(); // unblock producer đang chờ
         }
 
         void reset()
@@ -70,7 +88,9 @@ namespace rs
 
     private:
         mutable std::mutex mutex_;
-        std::condition_variable cv_;
+        std::condition_variable cv_not_empty_;
+        std::condition_variable cv_not_full_;
+        size_t capacity_ = 0;
         std::queue<T> queue_;
         bool closed_ = false;
     };

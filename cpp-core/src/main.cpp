@@ -24,6 +24,7 @@ struct SessionContext
     rs::PipelineConfig config;
     std::string filepath;
     rs::SessionInfo info;
+    std::atomic<bool> cancel_requested{false};
     std::unique_ptr<rs::ThreadPool> pool; // còn trỏ chứa ThreadPool của phiên
     std::mutex mutex;                     // để bảo vệ dữ liệu nội bộ
 };
@@ -46,11 +47,16 @@ public:
 
     bool setConfig(int64_t id, const rs::PipelineConfig &cfg)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = sessions_.find(id);
-        if (it == sessions_.end())
-            return false;
-        it->second->config = cfg;
+        std::shared_ptr<SessionContext> ctx;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = sessions_.find(id);
+            if (it == sessions_.end())
+                return false;
+            ctx = it->second;
+        }
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->config = cfg;
         return true;
     }
 
@@ -76,8 +82,9 @@ public:
         if (!ctx)
             return false;
         std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->cancel_requested.store(true);
         if (ctx->pool)
-            ctx->pool->waitAll();
+            ctx->pool->requestStop();
         ctx->info.status = rs::SessionStatus::ERROR;
         return true;
     }
@@ -88,11 +95,40 @@ private:
 };
 
 // ─── Run pipeline async ───────────────────────────────────────
+bool dbUpdateProgress(rs::PostGISClient &db, std::mutex &db_mutex, int64_t session_id, int tile_done)
+{
+    std::lock_guard<std::mutex> lock(db_mutex);
+    return db.updateSessionProgress(session_id, tile_done);
+}
+
+bool dbUpdateStatus(rs::PostGISClient &db, std::mutex &db_mutex, int64_t session_id, rs::SessionStatus status)
+{
+    std::lock_guard<std::mutex> lock(db_mutex);
+    return db.updateSessionStatus(session_id, status);
+}
+
+bool dbInsertDetections(rs::PostGISClient &db, std::mutex &db_mutex, const std::vector<rs::GeoDetection> &detections)
+{
+    std::lock_guard<std::mutex> lock(db_mutex);
+    return db.insertDetections(detections);
+}
+
+std::string dbQueryDetections(rs::PostGISClient &db, std::mutex &db_mutex, int64_t session_id)
+{
+    std::lock_guard<std::mutex> lock(db_mutex);
+    return db.queryDetectionsGeoJSON(session_id);
+}
+
 void runPipelineAsync(
     std::shared_ptr<SessionContext> ctx,
-    rs::PostGISClient &db)
+    rs::PostGISClient &db,
+    std::mutex &db_mutex)
 {
-    auto &cfg = ctx->config;
+    rs::PipelineConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        cfg = ctx->config;
+    }
 
     rs::TilingEngine engine(cfg.tile_size, cfg.overlap);
     std::string err;
@@ -120,11 +156,24 @@ void runPipelineAsync(
     }
 
     // Update tile_total vào DB
-    if (db.isConnected())
-        db.updateSessionProgress(session_id, 0);
+    dbUpdateProgress(db, db_mutex, session_id, 0);
 
     rs::CoordinateMapper mapper(engine.metadata());
-    ctx->pool = std::make_unique<rs::ThreadPool>(cfg.max_workers);
+    rs::ThreadPool *pool = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        // worker_count * 2 = backpressure chuẩn
+        // 7 workers → queue tối đa 14 tiles
+        int queue_cap = (cfg.max_workers > 0 ? cfg.max_workers : 7) * 2;
+
+        ctx->pool = std::make_unique<rs::ThreadPool>(
+            cfg.max_workers,
+            queue_cap);
+
+        LOG_INFO("Pipeline",
+                 "ThreadPool: workers=" + std::to_string(ctx->pool->workerCount()) + " queue_capacity=" + std::to_string(queue_cap));
+        pool = ctx->pool.get();
+    }
 
     std::atomic<int> tiles_done{0};
     std::mutex results_mutex;
@@ -135,14 +184,18 @@ void runPipelineAsync(
         ctx->info.status = rs::SessionStatus::PROCESSING;
     }
 
-    ctx->pool->start([&](rs::TileData &tile)
-                     {
+    pool->start([&](rs::TileData &tile)
+                {
+        if (ctx->cancel_requested.load())
+            return;
         rs::MockAI ai(3, 42);
         auto dets     = ai.infer(tile);
         auto geo_dets = mapper.mapDetections(dets, tile);
 
         {
             std::lock_guard<std::mutex> lock(results_mutex);
+            if (ctx->cancel_requested.load())
+                return;
             for (auto& g : geo_dets) {
                 g.session_id = session_id;
                 all_geo_dets.push_back(g);
@@ -154,13 +207,27 @@ void runPipelineAsync(
             std::lock_guard<std::mutex> lk(ctx->mutex);
             ctx->info.tile_done = done;
         }
-        if (db.isConnected() && done % 20 == 0)
-            db.updateSessionProgress(session_id, done); });
+        if (done % 20 == 0)
+            dbUpdateProgress(db, db_mutex, session_id, done); });
 
     engine.iterateTiles(session_id, [&](rs::TileData tile)
-                        { ctx->pool->submit(std::move(tile)); });
+                        {
+                            if (ctx->cancel_requested.load())
+                                return false;
+                            return pool->submit(std::move(tile)); });
     // ─── Fan-In point: tất cả Worker đã xong ─────────────────────
-    ctx->pool->waitAll();
+    pool->waitAll();
+
+    if (ctx->cancel_requested.load())
+    {
+        {
+            std::lock_guard<std::mutex> lk(ctx->mutex);
+            ctx->info.status = rs::SessionStatus::ERROR;
+        }
+        dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::ERROR);
+        engine.close();
+        return;
+    }
 
     // ─── Stitching: 1 luồng, global view ─────────────────────────
     {
@@ -177,11 +244,8 @@ void runPipelineAsync(
         ctx->info.status = rs::SessionStatus::SAVING;
     }
 
-    if (db.isConnected())
-    {
-        db.insertDetections(final_dets);
-        db.updateSessionStatus(session_id, rs::SessionStatus::DONE);
-    }
+    dbInsertDetections(db, db_mutex, final_dets);
+    dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::DONE);
 
     {
         std::lock_guard<std::mutex> lk(ctx->mutex);
@@ -209,6 +273,7 @@ int main()
         " password=" + std::string(std::getenv("POSTGRES_PASSWORD") ? std::getenv("POSTGRES_PASSWORD") : "rspassword");
 
     rs::PostGISClient db(conn_str);
+    std::mutex db_mutex;
     int retry = 0;
     while (!db.isConnected() && retry < 10)
     {
@@ -242,23 +307,26 @@ int main()
     broadcaster.setMetricsProvider([&]() -> rs::SystemMetrics
                                    {
     rs::SystemMetrics m;
-
     int64_t sid = active_session_id.load();
-    if (sid < 0) {
-        m.state = "IDLE";
-        return m;
-    }
+    if (sid < 0) { m.state = "IDLE"; return m; }
 
     rs::SessionInfo info = sessions.getInfo(sid);
-
-    static const char* state_names[] = {
+    static const char* names[] = {
         "IDLE","LOADING","TILING","PROCESSING",
         "STITCHING","SAVING","DONE","ERROR","RECOVERING"
     };
     m.session_id  = info.id;
-    m.state       = state_names[(int)info.status];
+    m.state       = names[(int)info.status];
     m.tiles_done  = info.tile_done;
     m.tiles_total = info.tile_total;
+
+    // Queue size từ pool nếu đang chạy
+    auto ctx = sessions.get(sid);
+    if (ctx) {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        if (ctx->pool)
+            m.queue_size = (int)ctx->pool->queueSize();
+    }
 
     return m; });
 
@@ -276,9 +344,13 @@ int main()
     gateway.onUploadInit([&]() -> int64_t
                          {
     // DB cấp ID chính thức (BIGSERIAL: 1, 2, 3...)
-    int64_t sid = db.isConnected()
-        ? db.createSession("pending", 0)
-        : (int64_t)std::time(nullptr);
+    int64_t sid = -1;
+    {
+        std::lock_guard<std::mutex> lock(db_mutex);
+        sid = db.createSession("pending", 0);
+    }
+    if (sid <= 0)
+        sid = (int64_t)std::time(nullptr);
 
     // SessionManager giữ slot với ID đó
     sessions.createSession("pending", sid);
@@ -297,7 +369,7 @@ int main()
     if (ctx) {
         std::lock_guard<std::mutex> lock(ctx->mutex);
         ctx->filepath      = filepath;
-        ctx->info.filename = filepath;
+        ctx->info.filename = filename;
     }
 
     LOG_INFO("main", "Session " + std::to_string(sid)
@@ -320,13 +392,14 @@ int main()
                 + " already started.");
             return false;
         }
+        ctx->cancel_requested.store(false);
         ctx->info.status = rs::SessionStatus::LOADING;
     }
 
     active_session_id.store(sid);
 
-    std::thread([ctx, &db, &active_session_id]() {
-        runPipelineAsync(ctx, db);
+    std::thread([ctx, &db, &db_mutex, &active_session_id]() {
+        runPipelineAsync(ctx, db, db_mutex);
 
         // Giữ session_id thêm 3 giây để broadcaster kịp gửi DONE
         std::this_thread::sleep_for(std::chrono::seconds(3));
@@ -340,20 +413,21 @@ int main()
         auto ctx = sessions.get(sid);
         if (!ctx) return false;
         // Close queue → workers tự dừng ở tile tiếp theo
-        if (ctx->pool) ctx->pool->waitAll();
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-        ctx->info.status = rs::SessionStatus::ERROR;
-        if (db.isConnected())
-            db.updateSessionStatus(sid, rs::SessionStatus::ERROR);
+        {
+            std::lock_guard<std::mutex> lock(ctx->mutex);
+            ctx->cancel_requested.store(true);
+            if (ctx->pool)
+                ctx->pool->requestStop();
+            ctx->info.status = rs::SessionStatus::ERROR;
+        }
+        dbUpdateStatus(db, db_mutex, sid, rs::SessionStatus::ERROR);
         return true; });
 
     gateway.onStatus([&](int64_t sid) -> rs::SessionInfo
                      { return sessions.getInfo(sid); });
 
     gateway.onResults([&](int64_t sid) -> std::string
-                      { return db.isConnected()
-                                   ? db.queryDetectionsGeoJSON(sid)
-                                   : "{}"; });
+                      { return dbQueryDetections(db, db_mutex, sid); });
 
     // ── Log endpoints ─────────────────────────────────────────
     LOG_INFO("main", "API endpoints:");

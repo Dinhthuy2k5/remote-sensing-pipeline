@@ -35,7 +35,8 @@ namespace rs
             << "\"ram_total_mb\":" << m.ram_total_mb << ","
             << "\"fps\":" << m.fps << ","
             << "\"tiles_done\":" << m.tiles_done << ","
-            << "\"tiles_total\":" << m.tiles_total
+            << "\"tiles_total\":" << m.tiles_total << ","
+            << "\"queue_size\":" << m.queue_size // ← thêm
             << "}";
         return oss.str();
     }

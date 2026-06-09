@@ -13,7 +13,8 @@ namespace rs
     {
     public:
         // worker_count: số thread, mặc định = số CPU core
-        explicit ThreadPool(int worker_count = 0);
+        explicit ThreadPool(int worker_count = 0,
+                            int queue_capacity = 0);
         ~ThreadPool();
 
         // Không cho copy
@@ -25,7 +26,8 @@ namespace rs
         void start(WorkerFn fn);
 
         // Producer: đẩy tile vào queue
-        void submit(TileData tile);
+        bool submit(TileData tile);
+        void requestStop();
 
         // Báo không còn tile nào nữa, chờ workers xong
         void waitAll();
@@ -34,6 +36,9 @@ namespace rs
         int workerCount() const { return worker_count_; }
         int tilesSubmitted() const { return tiles_submitted_.load(); }
         int tilesProcessed() const { return tiles_processed_.load(); }
+
+        // thread_pool.hpp
+        size_t queueSize() const { return queue_.size(); }
 
     private:
         int worker_count_;

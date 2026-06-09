@@ -52,6 +52,31 @@ namespace rs
         return cfg;
     }
 
+    bool HttpGateway::validateConfig(const PipelineConfig &cfg, std::string &error)
+    {
+        if (cfg.tile_size <= 0 || cfg.tile_size > 4096)
+        {
+            error = "tile_size must be in range 1..4096";
+            return false;
+        }
+        if (cfg.overlap < 0 || cfg.overlap >= cfg.tile_size)
+        {
+            error = "overlap must be >= 0 and smaller than tile_size";
+            return false;
+        }
+        if (cfg.max_workers < 0 || cfg.max_workers > 64)
+        {
+            error = "max_workers must be in range 0..64";
+            return false;
+        }
+        if (cfg.conf_thresh < 0.0f || cfg.conf_thresh > 1.0f)
+        {
+            error = "conf_thresh must be in range 0..1";
+            return false;
+        }
+        return true;
+    }
+
     // ─── sessionInfoToJson ────────────────────────────────────────
     std::string HttpGateway::sessionInfoToJson(const SessionInfo &info)
     {
@@ -174,6 +199,15 @@ namespace rs
                    {
                        int64_t sid = std::stoll(req.matches[1]);
                        PipelineConfig cfg = parseConfig(req.body);
+                       std::string validation_error;
+                       if (!validateConfig(cfg, validation_error))
+                       {
+                           res.status = 400;
+                           res.set_content(
+                               json{{"error", validation_error}}.dump(),
+                               "application/json");
+                           return;
+                       }
                        bool ok = config_cb_ ? config_cb_(sid, cfg) : true;
 
                        if (!ok)
@@ -204,8 +238,27 @@ namespace rs
                        int64_t sid = std::stoll(req.matches[1]);
 
                        // Config inline trong body (optional)
-                       if (!req.body.empty() && config_cb_)
-                           config_cb_(sid, parseConfig(req.body));
+                       if (!req.body.empty())
+                       {
+                           PipelineConfig cfg = parseConfig(req.body);
+                           std::string validation_error;
+                           if (!validateConfig(cfg, validation_error))
+                           {
+                               res.status = 400;
+                               res.set_content(
+                                   json{{"error", validation_error}}.dump(),
+                                   "application/json");
+                               return;
+                           }
+                           if (config_cb_ && !config_cb_(sid, cfg))
+                           {
+                               res.status = 404;
+                               res.set_content(
+                                   json{{"error", "Session not found"}}.dump(),
+                                   "application/json");
+                               return;
+                           }
+                       }
 
                        bool ok = start_cb_ ? start_cb_(sid) : false;
                        if (!ok)
