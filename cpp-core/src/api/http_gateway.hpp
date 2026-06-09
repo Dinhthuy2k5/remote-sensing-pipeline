@@ -74,6 +74,7 @@ namespace rs
         void setupRoutes();
         static std::string sessionStoragePath();
         static PipelineConfig parseConfig(const std::string &body);
+        static bool validateConfig(const PipelineConfig &cfg, std::string &error);
         static std::string sessionInfoToJson(const SessionInfo &info);
         // static ở trong private báo hiệu rằng: Các hàm này dùng để hỗ trợ nội bộ cho HttpGateway
         // (ví dụ: bóc tách chuỗi JSON) mà không cần phải phụ thuộc vào dữ liệu của một instance (đối tượng) cụ thể nào.

@@ -56,7 +56,7 @@ namespace rs
 
         // Đọc tất cả tile, gọi callback cho từng tile
         // Dùng cho single-thread producer
-        using TileCallback = std::function<void(TileData)>;
+        using TileCallback = std::function<bool(TileData)>;
         void iterateTiles(int64_t session_id, TileCallback cb);
 
         // Coordinate mapping

@@ -5,11 +5,13 @@
 namespace rs
 {
 
-    ThreadPool::ThreadPool(int worker_count)
+    ThreadPool::ThreadPool(int worker_count, int queue_capacity)
+        : queue_(queue_capacity > 0
+                     ? (size_t)queue_capacity
+                     : 0)
     {
         if (worker_count <= 0)
         {
-            // Tự detect số core, để lại 1 core cho main thread
             int hw = (int)std::thread::hardware_concurrency();
             worker_count_ = std::max(1, hw - 1);
         }
@@ -17,7 +19,8 @@ namespace rs
         {
             worker_count_ = worker_count;
         }
-        LOG_INFO("ThreadPool", "Initialized with " + std::to_string(worker_count_) + " workers.");
+        LOG_INFO("ThreadPool",
+                 "Initialized with " + std::to_string(worker_count_) + " workers, queue_capacity=" + (queue_capacity > 0 ? std::to_string(queue_capacity) : "unbounded"));
     }
 
     ThreadPool::~ThreadPool()
@@ -47,10 +50,17 @@ namespace rs
     }
 
     // ─── submit ───────────────────────────────────────────────────
-    void ThreadPool::submit(TileData tile)
+    bool ThreadPool::submit(TileData tile)
     {
+        if (!queue_.push(std::move(tile)))
+            return false;
         tiles_submitted_++;
-        queue_.push(std::move(tile));
+        return true;
+    }
+
+    void ThreadPool::requestStop()
+    {
+        queue_.close();
     }
 
     // ─── waitAll ──────────────────────────────────────────────────

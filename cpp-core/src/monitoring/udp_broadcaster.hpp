@@ -16,6 +16,7 @@ namespace rs
         float fps = 0.0f; // tiles/sec
         int tiles_done = 0;
         int tiles_total = 0;
+        int queue_size = 0;
         int64_t session_id = -1;
         std::string state = "IDLE";
     };

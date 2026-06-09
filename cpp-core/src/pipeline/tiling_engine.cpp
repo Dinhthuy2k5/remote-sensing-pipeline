@@ -210,7 +210,8 @@ namespace rs
                 TileData tile;
                 if (readTile(row, col, session_id, tile))
                 {
-                    cb(std::move(tile));
+                    if (!cb(std::move(tile)))
+                        return;
                 }
                 done++;
                 if (progress_cb_)
