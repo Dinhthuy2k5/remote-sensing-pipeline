@@ -109,8 +109,23 @@ namespace rs
                 res.set_header("Access-Control-Allow-Methods",
                                "GET, POST, OPTIONS");
                 res.set_header("Access-Control-Allow-Headers",
-                               "Content-Type");
+                               "Content-Type, X-Filename"); // ← thêm X-Filename
                 return httplib::Server::HandlerResponse::Unhandled;
+            });
+
+        // Thêm post routing handler để đảm bảo streaming handler cũng có CORS
+        svr_->set_post_routing_handler(
+            [](const httplib::Request &, httplib::Response &res)
+            {
+                // Chỉ set nếu chưa có — tránh duplicate
+                if (res.get_header_value("Access-Control-Allow-Origin").empty())
+                {
+                    res.set_header("Access-Control-Allow-Origin", "*");
+                    res.set_header("Access-Control-Allow-Methods",
+                                   "GET, POST, OPTIONS");
+                    res.set_header("Access-Control-Allow-Headers",
+                                   "Content-Type, X-Filename");
+                }
             });
 
         svr_->Options(".*", [](const httplib::Request &,
