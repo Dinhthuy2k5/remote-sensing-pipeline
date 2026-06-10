@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netdb.h>
 
 #include <fstream>
 #include <sstream>
@@ -134,8 +135,22 @@ namespace rs
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons((uint16_t)port_);
-        addr.sin_addr.s_addr = inet_addr("255.255.255.255");
 
+        struct hostent *he = gethostbyname("host.docker.internal");
+        if (he && he->h_addr_list[0])
+        {
+            addr.sin_addr = *(struct in_addr *)he->h_addr_list[0];
+            LOG_INFO("UdpBroadcaster",
+                     "Target: host.docker.internal = " + std::string(inet_ntoa(addr.sin_addr)));
+        }
+        else
+        {
+            addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+            LOG_WARN("UdpBroadcaster",
+                     "host.docker.internal not found, fallback to 255.255.255.255");
+        }
+
+        // ← Khai báo ở đây, trước while
         auto last_time = std::chrono::steady_clock::now();
         int last_tiles = 0;
 
@@ -161,10 +176,9 @@ namespace rs
 
             LOG_DEBUG("UdpBroadcaster", "Sent: " + payload);
 
-            // Interval ngắn hơn khi đang xử lý, dài hơn khi idle
             int sleep_ms = (m.state != "IDLE" && m.state != "DONE")
-                               ? 100           // đang processing → 100ms
-                               : interval_ms_; // idle → 500ms
+                               ? 100
+                               : interval_ms_;
 
             for (int i = 0; i < sleep_ms / 50 && running_; i++)
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
