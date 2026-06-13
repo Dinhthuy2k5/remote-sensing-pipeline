@@ -9,6 +9,8 @@
 #include "api/http_gateway.hpp"
 #include "monitoring/udp_broadcaster.hpp"
 #include "stitching/stitcher.hpp"
+#include "inference/onnx_ai.hpp"
+#include <onnxruntime_cxx_api.h>
 #include <iostream>
 #include <atomic>
 #include <mutex>
@@ -17,6 +19,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 
 // ─── Session context — lưu state từng session ─────────────────
 struct SessionContext
@@ -122,7 +125,8 @@ std::string dbQueryDetections(rs::PostGISClient &db, std::mutex &db_mutex, int64
 void runPipelineAsync(
     std::shared_ptr<SessionContext> ctx,
     rs::PostGISClient &db,
-    std::mutex &db_mutex)
+    std::mutex &db_mutex,
+    Ort::Env &ort_env)
 {
     rs::PipelineConfig cfg;
     {
@@ -184,31 +188,69 @@ void runPipelineAsync(
         ctx->info.status = rs::SessionStatus::PROCESSING;
     }
 
-    pool->start([&](rs::TileData &tile)
-                {
-        if (ctx->cancel_requested.load())
-            return;
-        rs::MockAI ai(3, 42);
-        auto dets     = ai.infer(tile);
-        auto geo_dets = mapper.mapDetections(dets, tile);
+    // Tạo AI pool — mỗi worker 1 instance
+    int n_workers = ctx->pool->workerCount();
+    std::vector<std::unique_ptr<rs::AIInterface>> ai_pool;
 
+    if (cfg.model == "onnx")
+    {
+        bool model_ok = std::filesystem::exists(cfg.model_path);
+        for (int i = 0; i < n_workers; i++)
         {
-            std::lock_guard<std::mutex> lock(results_mutex);
-            if (ctx->cancel_requested.load())
-                return;
-            for (auto& g : geo_dets) {
-                g.session_id = session_id;
-                all_geo_dets.push_back(g);
+            if (model_ok)
+            {
+                try
+                {
+                    ai_pool.push_back(std::make_unique<rs::OnnxAI>(
+                        ort_env, cfg.model_path, cfg.conf_thresh));
+                }
+                catch (const std::exception &e)
+                {
+                    LOG_ERROR("Pipeline",
+                              "OnnxAI init failed: " + std::string(e.what()) + " — falling back to MockAI");
+                    ai_pool.push_back(
+                        std::make_unique<rs::MockAI>(3, 42));
+                }
+            }
+            else
+            {
+                LOG_WARN("Pipeline",
+                         "Model not found: " + cfg.model_path + " — using MockAI");
+                ai_pool.push_back(std::make_unique<rs::MockAI>(3, 42));
             }
         }
+    }
+    else
+    {
+        for (int i = 0; i < n_workers; i++)
+            ai_pool.push_back(std::make_unique<rs::MockAI>(3, 42));
+    }
 
-        int done = ++tiles_done;
-        {
-            std::lock_guard<std::mutex> lk(ctx->mutex);
-            ctx->info.tile_done = done;
+    LOG_INFO("Pipeline",
+             "AI backend: " + ai_pool[0]->name() + " × " + std::to_string(n_workers) + " workers");
+
+    // Worker function — dùng worker_id index vào ai_pool
+    ctx->pool->start([&](rs::TileData &tile, int worker_id)
+                     {
+    auto& ai      = ai_pool[worker_id];
+    auto  dets    = ai->infer(tile);
+    auto  geo_dets = mapper.mapDetections(dets, tile);
+
+    {
+        std::lock_guard<std::mutex> lk(results_mutex);
+        for (auto& g : geo_dets) {
+            g.session_id = session_id;
+            all_geo_dets.push_back(g);
         }
-        if (done % 20 == 0)
-            dbUpdateProgress(db, db_mutex, session_id, done); });
+    }
+
+    int done = ++tiles_done;
+    {
+        std::lock_guard<std::mutex> lk(ctx->mutex);
+        ctx->info.tile_done = done;
+    }
+    if (db.isConnected() && done % 20 == 0)
+        dbUpdateProgress(db, db_mutex, session_id, done); });
 
     engine.iterateTiles(session_id, [&](rs::TileData tile)
                         {
@@ -289,6 +331,9 @@ int main()
 
     // Session Manager
     SessionManager sessions;
+
+    // ─── ONNX Runtime Environment (global, 1 lần) ─────────────────
+    Ort::Env ort_env(ORT_LOGGING_LEVEL_WARNING, "rs_pipeline");
 
     // ─── UDP Broadcaster ──────────────────────────────────────────
     int udp_port = 9090;
@@ -398,8 +443,8 @@ int main()
 
     active_session_id.store(sid);
 
-    std::thread([ctx, &db, &db_mutex, &active_session_id]() {
-        runPipelineAsync(ctx, db, db_mutex);
+    std::thread([ctx, &db, &db_mutex, &active_session_id, &ort_env]() {
+        runPipelineAsync(ctx, db, db_mutex, ort_env);
 
         // Giữ session_id thêm 3 giây để broadcaster kịp gửi DONE
         std::this_thread::sleep_for(std::chrono::seconds(3));

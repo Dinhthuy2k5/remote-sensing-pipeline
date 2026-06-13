@@ -99,7 +99,7 @@ namespace rs
             TileData &tile = item.value();
 
             // Gọi hàm xử lý được inject từ bên ngoài
-            worker_fn_(tile);
+            worker_fn_(tile, worker_id);
 
             tiles_processed_++;
         }
