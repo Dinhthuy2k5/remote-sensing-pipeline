@@ -1,4 +1,4 @@
-// Chạy trên host: node frontend/bridge.js
+// Chạy trên host: node frontend/bridge.cjs
 // Nhận UDP từ C++ container, relay sang WebSocket cho browser
 
 const dgram = require("dgram");

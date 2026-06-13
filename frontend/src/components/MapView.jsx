@@ -50,9 +50,12 @@ export default function MapView({ geojson }) {
         const addLayers = () => {
             // Xóa layer cũ nếu có
             [0, 1, 2, 3].forEach(classId => {
-                const id = `detections-${classId}`;
-                if (map.getLayer(id)) map.removeLayer(id);
-                if (map.getSource(id)) map.removeSource(id);
+                const sourceId = `detections-${classId}`;
+                const outlineId = `${sourceId}-outline`;
+
+                if (map.getLayer(outlineId)) map.removeLayer(outlineId);
+                if (map.getLayer(sourceId)) map.removeLayer(sourceId);
+                if (map.getSource(sourceId)) map.removeSource(sourceId);
             });
 
             // Group theo class_id
