@@ -2,10 +2,13 @@ import { useState } from "react";
 import MapView from "./components/MapView";
 import ControlPanel from "./components/ControlPanel";
 import TelemetryChart from "./components/TelemetryChart";
+import { classStats, modelInfo } from "./models/modelRegistry";
 
 export default function App() {
   const [geojson, setGeojson] = useState(null);
   const [sessionId, setSessionId] = useState(null);
+  const [modelKey, setModelKey] = useState("mock");
+  const stats = classStats(geojson, modelKey);
 
   return (
     <div style={{
@@ -34,9 +37,46 @@ export default function App() {
         <ControlPanel
           onResults={setGeojson}
           onSessionChange={setSessionId}
+          onModelChange={setModelKey}
         />
 
         <TelemetryChart />
+
+        <div style={{
+          background: "#1e1e2e", borderRadius: 8,
+          padding: "10px 12px", color: "#cdd6f4",
+          fontSize: 11, fontFamily: "monospace",
+        }}>
+          <div style={{
+            fontWeight: "bold",
+            marginBottom: 8,
+            color: "#f8f8f2",
+          }}>
+            Top Classes · {modelInfo(modelKey).label}
+          </div>
+          {stats.length > 0 ? stats.slice(0, 6).map(item => (
+            <div key={item.classId} style={{
+              display: "grid",
+              gridTemplateColumns: "12px 1fr auto",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 5,
+            }}>
+              <span style={{
+                width: 10,
+                height: 10,
+                borderRadius: 2,
+                background: item.color,
+              }} />
+              <span>{item.name}</span>
+              <span style={{ color: "#a6adc8" }}>{item.count}</span>
+            </div>
+          )) : (
+            <div style={{ color: "#a6adc8" }}>
+              Run a session to populate class counts.
+            </div>
+          )}
+        </div>
 
         {sessionId && (
           <div style={{
@@ -56,7 +96,7 @@ export default function App() {
 
       {/* Map */}
       <div style={{ borderRadius: 12, overflow: "hidden" }}>
-        <MapView geojson={geojson} />
+        <MapView geojson={geojson} modelKey={modelKey} />
       </div>
     </div>
   );

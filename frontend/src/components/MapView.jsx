@@ -1,18 +1,13 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { classColor, classStats, modelInfo } from "../models/modelRegistry";
 
-const CLASS_COLORS = {
-    0: "#22c55e",  // vegetation - green
-    1: "#3b82f6",  // water      - blue
-    2: "#f97316",  // building   - orange
-    3: "#a855f7",  // road       - purple
-};
-const CLASS_NAMES = ["Vegetation", "Water", "Building", "Road"];
-
-export default function MapView({ geojson }) {
+export default function MapView({ geojson, modelKey = "mock" }) {
     const mapRef = useRef(null);
     const mapInst = useRef(null);
+    const sourceIds = useRef([]);
+    const stats = classStats(geojson, modelKey);
 
     useEffect(() => {
         mapInst.current = new maplibregl.Map({
@@ -33,7 +28,7 @@ export default function MapView({ geojson }) {
                     source: "osm",
                 }],
             },
-            center: [-78.56, 41.05],  // Pennsylvania (test.tif area)
+            center: [-78.56, 41.05],
             zoom: 10,
         });
 
@@ -42,65 +37,58 @@ export default function MapView({ geojson }) {
         return () => mapInst.current?.remove();
     }, []);
 
-    // Vẽ detections lên map khi geojson thay đổi
     useEffect(() => {
         const map = mapInst.current;
         if (!map || !geojson?.features?.length) return;
 
         const addLayers = () => {
-            // Xóa layer cũ nếu có
-            [0, 1, 2, 3].forEach(classId => {
-                const sourceId = `detections-${classId}`;
+            sourceIds.current.forEach(sourceId => {
                 const outlineId = `${sourceId}-outline`;
-
                 if (map.getLayer(outlineId)) map.removeLayer(outlineId);
                 if (map.getLayer(sourceId)) map.removeLayer(sourceId);
                 if (map.getSource(sourceId)) map.removeSource(sourceId);
             });
+            sourceIds.current = [];
 
-            // Group theo class_id
-            const byClass = { 0: [], 1: [], 2: [], 3: [] };
-            geojson.features.forEach(f => {
-                const c = f.properties?.class_id ?? 0;
-                if (byClass[c]) byClass[c].push(f);
+            const byClass = new Map();
+            geojson.features.forEach(feature => {
+                const classId = feature.properties?.class_id ?? 0;
+                const features = byClass.get(classId) ?? [];
+                features.push(feature);
+                byClass.set(classId, features);
             });
 
-            // Thêm layer cho từng class
-            [0, 1, 2, 3].forEach(classId => {
-                const features = byClass[classId];
-                if (!features.length) return;
-
+            byClass.forEach((features, classId) => {
                 const sourceId = `detections-${classId}`;
+                sourceIds.current.push(sourceId);
+
                 map.addSource(sourceId, {
                     type: "geojson",
                     data: { type: "FeatureCollection", features },
                 });
 
-                // Fill
                 map.addLayer({
                     id: sourceId,
                     type: "fill",
                     source: sourceId,
                     paint: {
-                        "fill-color": CLASS_COLORS[classId],
+                        "fill-color": classColor(classId),
                         "fill-opacity": 0.35,
                     },
                 });
 
-                // Outline
                 map.addLayer({
                     id: `${sourceId}-outline`,
                     type: "line",
                     source: sourceId,
                     paint: {
-                        "line-color": CLASS_COLORS[classId],
+                        "line-color": classColor(classId),
                         "line-width": 1.5,
                         "line-opacity": 0.8,
                     },
                 });
             });
 
-            // Fly to first detection
             const first = geojson.features[0]?.geometry?.coordinates?.[0]?.[0];
             if (first) {
                 map.flyTo({
@@ -115,33 +103,46 @@ export default function MapView({ geojson }) {
 
         if (map.isStyleLoaded()) addLayers();
         else map.once("load", addLayers);
-
-    }, [geojson]);
+    }, [geojson, modelKey]);
 
     return (
         <div style={{ position: "relative", width: "100%", height: "100%" }}>
             <div ref={mapRef} style={{ width: "100%", height: "100%" }} />
 
-            {/* Legend */}
             <div style={{
                 position: "absolute", bottom: 30, right: 10,
                 background: "rgba(30,30,46,0.9)",
                 borderRadius: 8, padding: "8px 12px",
                 color: "#cdd6f4", fontSize: 11,
-                fontFamily: "monospace",
+                fontFamily: "monospace", minWidth: 170,
             }}>
-                {CLASS_NAMES.map((name, i) => (
-                    <div key={i} style={{
+                <div style={{
+                    color: "#a6adc8",
+                    marginBottom: 6,
+                    borderBottom: "1px solid #45475a",
+                    paddingBottom: 4,
+                }}>
+                    {modelInfo(modelKey).label}
+                </div>
+
+                {stats.length > 0 ? stats.slice(0, 8).map(item => (
+                    <div key={item.classId} style={{
                         display: "flex", alignItems: "center", gap: 6,
                         marginBottom: 3,
                     }}>
                         <div style={{
                             width: 12, height: 12, borderRadius: 2,
-                            background: CLASS_COLORS[i],
+                            background: item.color,
+                            flexShrink: 0,
                         }} />
-                        {name}
+                        <span style={{ minWidth: 0 }}>{item.name}</span>
+                        <span style={{ marginLeft: "auto", color: "#a6adc8" }}>
+                            {item.count}
+                        </span>
                     </div>
-                ))}
+                )) : (
+                    <div style={{ color: "#a6adc8" }}>No detections</div>
+                )}
             </div>
         </div>
     );
