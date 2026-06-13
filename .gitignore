@@ -18,3 +18,5 @@ volumes/
 
 # Node
 frontend/node_modules/
+cpp-core/models/*.onnx
+cpp-core/models/*.pt
