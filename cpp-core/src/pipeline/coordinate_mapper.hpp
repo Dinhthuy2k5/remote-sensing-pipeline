@@ -24,6 +24,7 @@ namespace rs
 
         // Pixel trong ảnh gốc → WGS84 (lat, lon)
         GeoPoint pixelToWGS84(int pixel_x, int pixel_y) const;
+        std::vector<GeoPoint> imageFootprint() const;
 
         // Bbox detection trong tile → polygon WGS84 (4 góc)
         std::vector<GeoPoint> detectionToPolygon(

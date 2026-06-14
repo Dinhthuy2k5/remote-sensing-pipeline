@@ -11,6 +11,7 @@
 #include "stitching/stitcher.hpp"
 #include "inference/onnx_ai.hpp"
 #include "inference/onnx_obb_ai.hpp"
+#include "inference/onnx_segformer_ai.hpp"
 #include <onnxruntime_cxx_api.h>
 #include <iostream>
 #include <atomic>
@@ -164,6 +165,10 @@ void runPipelineAsync(
     dbUpdateProgress(db, db_mutex, session_id, 0);
 
     rs::CoordinateMapper mapper(engine.metadata());
+    {
+        std::lock_guard<std::mutex> lock(ctx->mutex);
+        ctx->info.footprint = mapper.imageFootprint();
+    }
     rs::ThreadPool *pool = nullptr;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -193,10 +198,12 @@ void runPipelineAsync(
     int n_workers = ctx->pool->workerCount();
     std::vector<std::unique_ptr<rs::AIInterface>> ai_pool;
 
-    if (cfg.model == "onnx" || cfg.model == "dota_obb")
+    if (cfg.model == "onnx" || cfg.model == "dota_obb" || cfg.model == "segformer_loveda")
     {
         if (cfg.model == "dota_obb" && cfg.model_path == "/app/models/yolov8n-seg.onnx")
             cfg.model_path = "/app/models/yolo11n-obb.onnx";
+        if (cfg.model == "segformer_loveda" && cfg.model_path == "/app/models/yolov8n-seg.onnx")
+            cfg.model_path = "/app/models/segformer-loveda-b2.onnx";
 
         bool model_ok = std::filesystem::exists(cfg.model_path);
         for (int i = 0; i < n_workers; i++)
@@ -208,6 +215,11 @@ void runPipelineAsync(
                     if (cfg.model == "dota_obb")
                     {
                         ai_pool.push_back(std::make_unique<rs::OnnxObbAI>(
+                            ort_env, cfg.model_path, cfg.conf_thresh));
+                    }
+                    else if (cfg.model == "segformer_loveda")
+                    {
+                        ai_pool.push_back(std::make_unique<rs::OnnxSegFormerAI>(
                             ort_env, cfg.model_path, cfg.conf_thresh));
                     }
                     else

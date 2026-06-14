@@ -122,6 +122,16 @@ namespace rs
         return projectedToWGS84(proj_x, proj_y);
     }
 
+    std::vector<GeoPoint> CoordinateMapper::imageFootprint() const
+    {
+        return {
+            pixelToWGS84(0, 0),
+            pixelToWGS84(meta_.width, 0),
+            pixelToWGS84(meta_.width, meta_.height),
+            pixelToWGS84(0, meta_.height)
+        };
+    }
+
     // ─── detectionToPolygon ───────────────────────────────────────
     // Bbox trong tile (pixel coords) → 4 góc WGS84
     // Lưu ý: bbox.x, bbox.y là offset trong tile

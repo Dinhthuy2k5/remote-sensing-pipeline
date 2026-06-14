@@ -103,6 +103,7 @@ namespace rs
         SessionStatus status;
         int tile_total;
         int tile_done;
+        std::vector<GeoPoint> footprint;
     };
 
 } // namespace rs
