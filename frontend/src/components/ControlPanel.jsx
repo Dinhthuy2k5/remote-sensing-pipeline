@@ -4,6 +4,21 @@ import {
     cancelSession, getStatus, getResults
 } from "../api/backend";
 
+const MODEL_PRESETS = {
+    mock: {
+        model_path: "",
+        conf_thresh: 0.3,
+    },
+    onnx: {
+        model_path: "/app/models/yolov8n-seg.onnx",
+        conf_thresh: 0.05,
+    },
+    dota_obb: {
+        model_path: "/app/models/yolo11n-obb.onnx",
+        conf_thresh: 0.05,
+    },
+};
+
 export default function ControlPanel({ onResults, onSessionChange, onModelChange }) {
     const [sessionId, setSessionId] = useState(null);
     const [status, setStatus] = useState("idle");
@@ -13,6 +28,7 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
         tile_size: 512,
         overlap: 64,
         model: "mock",
+        model_path: "",
         max_workers: 2,
         conf_thresh: 0.3,
     });
@@ -115,11 +131,17 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
                     }}>Model</div>
                     <select
                         value={config.model}
-                        onChange={e => setConfigState(prev => ({
-                            ...prev,
-                            model: e.target.value,
-                            conf_thresh: e.target.value === "onnx" ? 0.05 : prev.conf_thresh,
-                        }))}
+                        onChange={e => {
+                            const model = e.target.value;
+                            const preset = MODEL_PRESETS[model] ?? MODEL_PRESETS.mock;
+                            setConfigState(prev => ({
+                                ...prev,
+                                model,
+                                model_path: preset.model_path,
+                                conf_thresh: preset.conf_thresh,
+                            }));
+                            onModelChange?.(model);
+                        }}
                         style={{
                             width: "100%", padding: "4px 8px",
                             background: "#313244", border: "1px solid #45475a",
@@ -129,6 +151,7 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
                     >
                         <option value="mock">MockAI remote sensing</option>
                         <option value="onnx">YOLOv8n-seg COCO</option>
+                        <option value="dota_obb">YOLO11n-OBB DOTA</option>
                     </select>
                 </div>
 

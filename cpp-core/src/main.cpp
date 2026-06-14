@@ -10,6 +10,7 @@
 #include "monitoring/udp_broadcaster.hpp"
 #include "stitching/stitcher.hpp"
 #include "inference/onnx_ai.hpp"
+#include "inference/onnx_obb_ai.hpp"
 #include <onnxruntime_cxx_api.h>
 #include <iostream>
 #include <atomic>
@@ -192,8 +193,11 @@ void runPipelineAsync(
     int n_workers = ctx->pool->workerCount();
     std::vector<std::unique_ptr<rs::AIInterface>> ai_pool;
 
-    if (cfg.model == "onnx")
+    if (cfg.model == "onnx" || cfg.model == "dota_obb")
     {
+        if (cfg.model == "dota_obb" && cfg.model_path == "/app/models/yolov8n-seg.onnx")
+            cfg.model_path = "/app/models/yolo11n-obb.onnx";
+
         bool model_ok = std::filesystem::exists(cfg.model_path);
         for (int i = 0; i < n_workers; i++)
         {
@@ -201,8 +205,16 @@ void runPipelineAsync(
             {
                 try
                 {
-                    ai_pool.push_back(std::make_unique<rs::OnnxAI>(
-                        ort_env, cfg.model_path, cfg.conf_thresh));
+                    if (cfg.model == "dota_obb")
+                    {
+                        ai_pool.push_back(std::make_unique<rs::OnnxObbAI>(
+                            ort_env, cfg.model_path, cfg.conf_thresh));
+                    }
+                    else
+                    {
+                        ai_pool.push_back(std::make_unique<rs::OnnxAI>(
+                            ort_env, cfg.model_path, cfg.conf_thresh));
+                    }
                 }
                 catch (const std::exception &e)
                 {
