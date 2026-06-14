@@ -181,7 +181,7 @@ namespace rs
                                : interval_ms_;
 
             for (int i = 0; i < sleep_ms / 50 && running_; i++)
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
 } // namespace rs
