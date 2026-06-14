@@ -8,6 +8,7 @@ export default function App() {
   const [geojson, setGeojson] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [modelKey, setModelKey] = useState("mock");
+  const [footprint, setFootprint] = useState(null);
   const stats = classStats(geojson, modelKey);
 
   return (
@@ -38,6 +39,7 @@ export default function App() {
           onResults={setGeojson}
           onSessionChange={setSessionId}
           onModelChange={setModelKey}
+          onFootprintChange={setFootprint}
         />
 
         <TelemetryChart />
@@ -96,7 +98,7 @@ export default function App() {
 
       {/* Map */}
       <div style={{ borderRadius: 12, overflow: "hidden" }}>
-        <MapView geojson={geojson} modelKey={modelKey} />
+        <MapView geojson={geojson} footprint={footprint} modelKey={modelKey} />
       </div>
     </div>
   );

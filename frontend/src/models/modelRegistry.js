@@ -39,6 +39,13 @@ export const MODEL_REGISTRY = {
             "Roundabout", "Harbor", "Swimming Pool", "Helicopter",
         ],
     },
+    segformer_loveda: {
+        label: "SegFormer LoveDA",
+        names: [
+            "Ignore", "Background", "Building", "Road",
+            "Water", "Barren", "Forest", "Agricultural",
+        ],
+    },
 };
 
 export function modelInfo(modelKey) {

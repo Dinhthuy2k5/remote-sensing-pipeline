@@ -3,10 +3,51 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { classColor, classStats, modelInfo } from "../models/modelRegistry";
 
+function collectCoordinates(geometry, out = []) {
+    if (!geometry) return out;
+
+    const walk = (coords) => {
+        if (!Array.isArray(coords)) return;
+        if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+            out.push(coords);
+            return;
+        }
+        coords.forEach(walk);
+    };
+
+    walk(geometry.coordinates);
+    return out;
+}
+
+function fitToData(map, geojson) {
+    const coords = [];
+    const hasDetections = geojson?.features?.length > 0;
+
+    if (hasDetections) {
+        geojson.features.forEach(feature => {
+            collectCoordinates(feature.geometry, coords);
+        });
+    }
+
+    if (!coords.length) return;
+
+    const bounds = coords.reduce(
+        (b, coord) => b.extend(coord),
+        new maplibregl.LngLatBounds(coords[0], coords[0]),
+    );
+
+    map.fitBounds(bounds, {
+        padding: 48,
+        maxZoom: 14,
+        duration: 900,
+    });
+}
+
 export default function MapView({ geojson, modelKey = "mock" }) {
     const mapRef = useRef(null);
     const mapInst = useRef(null);
     const sourceIds = useRef([]);
+    const footprintSourceId = "image-footprint";
     const stats = classStats(geojson, modelKey);
 
     useEffect(() => {
@@ -39,7 +80,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
 
     useEffect(() => {
         const map = mapInst.current;
-        if (!map || !geojson?.features?.length) return;
+        if (!map) return;
 
         const addLayers = () => {
             sourceIds.current.forEach(sourceId => {
@@ -49,6 +90,17 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                 if (map.getSource(sourceId)) map.removeSource(sourceId);
             });
             sourceIds.current = [];
+
+            if (map.getLayer(`${footprintSourceId}-outline`))
+                map.removeLayer(`${footprintSourceId}-outline`);
+            if (map.getLayer(`${footprintSourceId}-fill`))
+                map.removeLayer(`${footprintSourceId}-fill`);
+            if (map.getSource(footprintSourceId))
+                map.removeSource(footprintSourceId);
+
+            if (!geojson?.features?.length) {
+                return;
+            }
 
             const byClass = new Map();
             geojson.features.forEach(feature => {
@@ -73,7 +125,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                     source: sourceId,
                     paint: {
                         "fill-color": classColor(classId),
-                        "fill-opacity": 0.35,
+                        "fill-opacity": 0.55,
                     },
                 });
 
@@ -83,20 +135,13 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                     source: sourceId,
                     paint: {
                         "line-color": classColor(classId),
-                        "line-width": 1.5,
-                        "line-opacity": 0.8,
+                        "line-width": 3,
+                        "line-opacity": 0.95,
                     },
                 });
             });
 
-            const first = geojson.features[0]?.geometry?.coordinates?.[0]?.[0];
-            if (first) {
-                map.flyTo({
-                    center: first,
-                    zoom: 13,
-                    duration: 1500,
-                });
-            }
+            fitToData(map, geojson);
 
             console.log(`[Map] Rendered ${geojson.features.length} detections`);
         };

@@ -17,9 +17,13 @@ const MODEL_PRESETS = {
         model_path: "/app/models/yolo11n-obb.onnx",
         conf_thresh: 0.05,
     },
+    segformer_loveda: {
+        model_path: "/app/models/segformer-loveda-b2.onnx",
+        conf_thresh: 0.45,
+    },
 };
 
-export default function ControlPanel({ onResults, onSessionChange, onModelChange }) {
+export default function ControlPanel({ onResults, onSessionChange, onModelChange, onFootprintChange }) {
     const [sessionId, setSessionId] = useState(null);
     const [status, setStatus] = useState("idle");
     const [progress, setProgress] = useState(0);
@@ -51,6 +55,8 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
             const sid = r.session_id;
             setSessionId(sid);
             onSessionChange?.(sid);
+            onResults?.(null);
+            onFootprintChange?.(null);
             addLog(`Uploaded. session_id=${sid}`);
 
             // Config
@@ -75,6 +81,8 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
             try {
                 const s = await getStatus(sid);
                 setProgress(s.progress ?? 0);
+                if (s.footprint)
+                    onFootprintChange?.(s.footprint);
                 addLog(`${s.status} ${s.tile_done}/${s.tile_total}`);
 
                 if (s.status === "DONE") {
@@ -152,6 +160,7 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
                         <option value="mock">MockAI remote sensing</option>
                         <option value="onnx">YOLOv8n-seg COCO</option>
                         <option value="dota_obb">YOLO11n-OBB DOTA</option>
+                        <option value="segformer_loveda">SegFormer LoveDA</option>
                     </select>
                 </div>
 
