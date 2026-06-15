@@ -4,13 +4,37 @@ import {
     cancelSession, getStatus, getResults
 } from "../api/backend";
 
-export default function ControlPanel({ onResults, onSessionChange }) {
+const MODEL_PRESETS = {
+    mock: {
+        model_path: "",
+        conf_thresh: 0.3,
+    },
+    onnx: {
+        model_path: "/app/models/yolov8n-seg.onnx",
+        conf_thresh: 0.05,
+    },
+    dota_obb: {
+        model_path: "/app/models/yolo11n-obb.onnx",
+        conf_thresh: 0.05,
+    },
+    segformer_loveda: {
+        model_path: "/app/models/segformer-loveda-b2.onnx",
+        conf_thresh: 0.45,
+    },
+};
+
+export default function ControlPanel({ onResults, onSessionChange, onModelChange, onFootprintChange }) {
     const [sessionId, setSessionId] = useState(null);
     const [status, setStatus] = useState("idle");
     const [progress, setProgress] = useState(0);
     const [log, setLog] = useState([]);
     const [config, setConfigState] = useState({
-        tile_size: 512, overlap: 64, model: "mock"
+        tile_size: 512,
+        overlap: 64,
+        model: "mock",
+        model_path: "",
+        max_workers: 2,
+        conf_thresh: 0.3,
     });
     const pollingRef = useRef(null);
 
@@ -31,10 +55,13 @@ export default function ControlPanel({ onResults, onSessionChange }) {
             const sid = r.session_id;
             setSessionId(sid);
             onSessionChange?.(sid);
+            onResults?.(null);
+            onFootprintChange?.(null);
             addLog(`Uploaded. session_id=${sid}`);
 
             // Config
             await setConfig(sid, config);
+            onModelChange?.(config.model);
             addLog(`Config set: tile_size=${config.tile_size} model=${config.model}`);
 
             // Start
@@ -54,6 +81,8 @@ export default function ControlPanel({ onResults, onSessionChange }) {
             try {
                 const s = await getStatus(sid);
                 setProgress(s.progress ?? 0);
+                if (s.footprint)
+                    onFootprintChange?.(s.footprint);
                 addLog(`${s.status} ${s.tile_done}/${s.tile_total}`);
 
                 if (s.status === "DONE") {
@@ -101,26 +130,60 @@ export default function ControlPanel({ onResults, onSessionChange }) {
             {/* Config */}
             <div style={{
                 display: "grid",
-                gridTemplateColumns: "1fr 1fr 1fr", gap: 8
+                gridTemplateColumns: "1fr 1fr", gap: 8
             }}>
+                <div>
+                    <div style={{
+                        fontSize: 10, color: "#a6adc8",
+                        marginBottom: 3
+                    }}>Model</div>
+                    <select
+                        value={config.model}
+                        onChange={e => {
+                            const model = e.target.value;
+                            const preset = MODEL_PRESETS[model] ?? MODEL_PRESETS.mock;
+                            setConfigState(prev => ({
+                                ...prev,
+                                model,
+                                model_path: preset.model_path,
+                                conf_thresh: preset.conf_thresh,
+                            }));
+                            onModelChange?.(model);
+                        }}
+                        style={{
+                            width: "100%", padding: "4px 8px",
+                            background: "#313244", border: "1px solid #45475a",
+                            borderRadius: 4, color: "#cdd6f4",
+                            fontSize: 12, boxSizing: "border-box",
+                        }}
+                    >
+                        <option value="mock">MockAI remote sensing</option>
+                        <option value="onnx">YOLOv8n-seg COCO</option>
+                        <option value="dota_obb">YOLO11n-OBB DOTA</option>
+                        <option value="segformer_loveda">SegFormer LoveDA</option>
+                    </select>
+                </div>
+
                 {[
-                    { key: "tile_size", label: "Tile Size", type: "number" },
-                    { key: "overlap", label: "Overlap", type: "number" },
-                    { key: "model", label: "Model", type: "text" },
-                ].map(({ key, label, type }) => (
+                    { key: "tile_size", label: "Tile Size", step: 1 },
+                    { key: "overlap", label: "Overlap", step: 1 },
+                    { key: "max_workers", label: "Workers", step: 1 },
+                    { key: "conf_thresh", label: "Confidence", step: 0.01 },
+                ].map(({ key, label, step }) => (
                     <div key={key}>
                         <div style={{
                             fontSize: 10, color: "#a6adc8",
                             marginBottom: 3
                         }}>{label}</div>
                         <input
-                            type={type}
+                            type="number"
+                            step={step}
                             value={config[key]}
                             onChange={e => setConfigState(prev => ({
                                 ...prev,
-                                [key]: type === "number"
-                                    ? parseInt(e.target.value) || 0
-                                    : e.target.value
+                                [key]: key === "conf_thresh"
+                                    ? parseFloat(e.target.value) || 0
+                                    : parseInt(e.target.value) || 0
                             }))}
                             style={{
                                 width: "100%", padding: "4px 8px",

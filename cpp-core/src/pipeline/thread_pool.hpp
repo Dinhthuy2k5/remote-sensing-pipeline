@@ -22,7 +22,8 @@ namespace rs
         ThreadPool &operator=(const ThreadPool &) = delete;
 
         // Khởi động workers, truyền vào hàm xử lý 1 tile
-        using WorkerFn = std::function<void(TileData &)>;
+        // worker_fn nhận thêm worker_id
+        using WorkerFn = std::function<void(TileData &, int worker_id)>;
         void start(WorkerFn fn);
 
         // Producer: đẩy tile vào queue

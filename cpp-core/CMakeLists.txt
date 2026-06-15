@@ -9,6 +9,12 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PQXX REQUIRED libpqxx)
 
+# ONNX Runtime
+find_library(ONNXRUNTIME_LIB onnxruntime
+    PATHS /usr/local/lib
+    REQUIRED)
+set(ONNXRUNTIME_INCLUDE_DIR /usr/local/include)
+
 file(GLOB_RECURSE MAIN_SOURCES "src/*.cpp")
 
 add_executable(rs_pipeline ${MAIN_SOURCES})
@@ -17,10 +23,11 @@ target_include_directories(rs_pipeline PRIVATE
     src/
     ${GDAL_INCLUDE_DIRS}
     ${PQXX_INCLUDE_DIRS}
+    ${ONNXRUNTIME_INCLUDE_DIR}
 )
 
 target_compile_definitions(rs_pipeline PRIVATE
-    CPPHTTPLIB_OPENSSL_SUPPORT=0   # ← disable SSL, tránh link lỗi
+    CPPHTTPLIB_OPENSSL_SUPPORT=0
 )
 
 target_link_libraries(rs_pipeline PRIVATE
@@ -28,8 +35,9 @@ target_link_libraries(rs_pipeline PRIVATE
     ${PQXX_LIBRARIES}
     Threads::Threads
     stdc++fs
-    ssl                  # ← thêm
-    crypto               # ← thêm
+    ssl
+    crypto
+    ${ONNXRUNTIME_LIB}
 )
 
 target_compile_options(rs_pipeline PRIVATE -Wall -Wextra)

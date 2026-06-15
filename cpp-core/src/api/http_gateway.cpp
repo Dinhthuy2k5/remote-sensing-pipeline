@@ -41,6 +41,7 @@ namespace rs
             cfg.tile_size = j.value("tile_size", cfg.tile_size);
             cfg.overlap = j.value("overlap", cfg.overlap);
             cfg.model = j.value("model", cfg.model);
+            cfg.model_path = j.value("model_path", cfg.model_path);
             cfg.max_workers = j.value("max_workers", cfg.max_workers);
             cfg.conf_thresh = j.value("conf_thresh", cfg.conf_thresh);
         }
@@ -94,6 +95,23 @@ namespace rs
             {"tile_total", info.tile_total},
             {"tile_done", info.tile_done},
             {"progress", progress}};
+
+        if (info.footprint.size() >= 4)
+        {
+            json ring = json::array();
+            for (const auto &p : info.footprint)
+                ring.push_back({p.lon, p.lat});
+            ring.push_back({info.footprint.front().lon, info.footprint.front().lat});
+
+            j["footprint"] = {
+                {"type", "Feature"},
+                {"properties", {{"kind", "image_footprint"}}},
+                {"geometry", {
+                    {"type", "Polygon"},
+                    {"coordinates", json::array({ring})}
+                }}
+            };
+        }
         return j.dump();
     }
 
@@ -240,6 +258,7 @@ namespace rs
                            {"tile_size", cfg.tile_size},
                            {"overlap", cfg.overlap},
                            {"model", cfg.model},
+                           {"model_path", cfg.model_path},
                            {"conf_thresh", cfg.conf_thresh}};
                        res.set_content(resp.dump(), "application/json");
                        LOG_INFO("HttpGateway",

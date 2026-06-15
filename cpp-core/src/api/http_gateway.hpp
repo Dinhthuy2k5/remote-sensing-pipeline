@@ -21,6 +21,7 @@ namespace rs
         int tile_size = 512;
         int overlap = 64;
         std::string model = "mock";
+        std::string model_path = "/app/models/yolov8n-seg.onnx";
         int max_workers = 0;
         float conf_thresh = 0.5f;
     };
