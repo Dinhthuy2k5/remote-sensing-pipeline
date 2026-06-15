@@ -124,7 +124,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                     type: "fill",
                     source: sourceId,
                     paint: {
-                        "fill-color": classColor(classId),
+                        "fill-color": classColor(classId, modelKey),
                         "fill-opacity": 0.55,
                     },
                 });
@@ -134,7 +134,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                     type: "line",
                     source: sourceId,
                     paint: {
-                        "line-color": classColor(classId),
+                        "line-color": classColor(classId, modelKey),
                         "line-width": 3,
                         "line-opacity": 0.95,
                     },

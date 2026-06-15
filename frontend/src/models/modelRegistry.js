@@ -8,6 +8,7 @@ export const MODEL_REGISTRY = {
     mock: {
         label: "MockAI remote sensing",
         names: ["Vegetation", "Water", "Building", "Road"],
+        colors: ["#22c55e", "#0284c7", "#f97316", "#6b7280"],
     },
     onnx: {
         label: "YOLOv8n-seg COCO",
@@ -45,6 +46,16 @@ export const MODEL_REGISTRY = {
             "Ignore", "Background", "Building", "Road",
             "Water", "Barren", "Forest", "Agricultural",
         ],
+        colors: [
+            "#9ca3af", // Ignore
+            "#e5e7eb", // Background
+            "#f97316", // Building
+            "#6b7280", // Road
+            "#0284c7", // Water
+            "#a16207", // Barren
+            "#15803d", // Forest
+            "#84cc16", // Agricultural
+        ],
     },
 };
 
@@ -57,8 +68,10 @@ export function className(modelKey, classId) {
     return info.names[classId] ?? `Class ${classId}`;
 }
 
-export function classColor(classId) {
-    return PALETTE[Math.abs(Number(classId) || 0) % PALETTE.length];
+export function classColor(classId, modelKey) {
+    const info = modelInfo(modelKey);
+    const id = Number(classId) || 0;
+    return info.colors?.[id] ?? PALETTE[Math.abs(id) % PALETTE.length];
 }
 
 export function classStats(geojson, modelKey) {
@@ -68,7 +81,7 @@ export function classStats(geojson, modelKey) {
         const entry = counts.get(classId) ?? {
             classId,
             name: className(modelKey, classId),
-            color: classColor(classId),
+            color: classColor(classId, modelKey),
             count: 0,
         };
         entry.count += 1;
