@@ -3,6 +3,7 @@
 
 #include <ogr_spatialref.h>
 #include <ogr_geometry.h>
+#include <cmath>
 #include <stdexcept>
 
 namespace rs
@@ -140,6 +141,19 @@ namespace rs
         const Detection &det,
         const TileData &tile) const
     {
+        if (det.polygon.size() >= 4)
+        {
+            std::vector<GeoPoint> polygon;
+            polygon.reserve(det.polygon.size());
+            for (const auto &p : det.polygon)
+            {
+                int px = tile.pixel_x_offset + (int)std::round(p.x);
+                int py = tile.pixel_y_offset + (int)std::round(p.y);
+                polygon.push_back(pixelToWGS84(px, py));
+            }
+            return polygon;
+        }
+
         // Tọa độ pixel trong ảnh gốc
         int x0 = tile.pixel_x_offset + (int)det.bbox.x;
         int y0 = tile.pixel_y_offset + (int)det.bbox.y;

@@ -19,6 +19,7 @@
 #include <map>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -196,7 +197,11 @@ void runPipelineAsync(
 
     // Tạo AI pool — mỗi worker 1 instance
     int n_workers = ctx->pool->workerCount();
+    int n_ai_instances = cfg.model == "segformer_loveda"
+                             ? std::min(n_workers, 4)
+                             : n_workers;
     std::vector<std::unique_ptr<rs::AIInterface>> ai_pool;
+    std::vector<std::unique_ptr<std::mutex>> ai_mutexes;
 
     if (cfg.model == "onnx" || cfg.model == "dota_obb" || cfg.model == "segformer_loveda")
     {
@@ -206,7 +211,7 @@ void runPipelineAsync(
             cfg.model_path = "/app/models/segformer-loveda-b2.onnx";
 
         bool model_ok = std::filesystem::exists(cfg.model_path);
-        for (int i = 0; i < n_workers; i++)
+        for (int i = 0; i < n_ai_instances; i++)
         {
             if (model_ok)
             {
@@ -254,10 +259,18 @@ void runPipelineAsync(
              "AI backend: " + ai_pool[0]->name() + " × " + std::to_string(n_workers) + " workers");
 
     // Worker function — dùng worker_id index vào ai_pool
+    ai_mutexes.reserve(ai_pool.size());
+    for (size_t i = 0; i < ai_pool.size(); i++)
+        ai_mutexes.push_back(std::make_unique<std::mutex>());
+
     ctx->pool->start([&](rs::TileData &tile, int worker_id)
                      {
-    auto& ai      = ai_pool[worker_id];
-    auto  dets    = ai->infer(tile);
+    int ai_idx = worker_id % (int)ai_pool.size();
+    std::vector<rs::Detection> dets;
+    {
+        std::lock_guard<std::mutex> ai_lock(*ai_mutexes[ai_idx]);
+        dets = ai_pool[ai_idx]->infer(tile);
+    }
     auto  geo_dets = mapper.mapDetections(dets, tile);
 
     {

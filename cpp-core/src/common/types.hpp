@@ -15,12 +15,19 @@ namespace rs
         float width, height;
     };
 
+    struct PixelPoint
+    {
+        float x;
+        float y;
+    };
+
     // ─── AI Output ────────────────────────────────────────────────
     struct Detection
     // Kết quả nguyên thủy trả về từ module Mock AI (hoặc ONNX sau này).
     // Nó bao gồm hộp giới hạn (BoundingBox), loại đối tượng AI nhận diện được (class_id), và độ tin cậy của AI (confidence).
     {
         BoundingBox bbox;
+        std::vector<PixelPoint> polygon;
         int class_id;
         float confidence;
     };

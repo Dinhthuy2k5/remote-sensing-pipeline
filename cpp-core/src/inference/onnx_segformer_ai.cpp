@@ -19,6 +19,90 @@ namespace rs
         constexpr int MAX_DETECTIONS_PER_TILE = 256;
         constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
         constexpr float STD[3] = {0.229f, 0.224f, 0.225f};
+
+        struct GridPoint
+        {
+            int x;
+            int y;
+        };
+
+        struct GridEdge
+        {
+            GridPoint a;
+            GridPoint b;
+        };
+
+        bool samePoint(const GridPoint &a, const GridPoint &b)
+        {
+            return a.x == b.x && a.y == b.y;
+        }
+
+        double polygonArea(const std::vector<GridPoint> &ring)
+        {
+            if (ring.size() < 3)
+                return 0.0;
+
+            double area = 0.0;
+            for (size_t i = 0; i < ring.size(); i++)
+            {
+                const auto &a = ring[i];
+                const auto &b = ring[(i + 1) % ring.size()];
+                area += (double)a.x * b.y - (double)b.x * a.y;
+            }
+            return std::abs(area) * 0.5;
+        }
+
+        std::vector<GridPoint> largestBoundaryRing(std::vector<GridEdge> edges)
+        {
+            std::vector<GridPoint> best;
+            double best_area = 0.0;
+
+            while (!edges.empty())
+            {
+                GridEdge first = edges.back();
+                edges.pop_back();
+
+                std::vector<GridPoint> ring;
+                ring.push_back(first.a);
+                GridPoint current = first.b;
+
+                int guard = 0;
+                while (!samePoint(current, ring.front()) && guard++ < 4096)
+                {
+                    ring.push_back(current);
+
+                    auto it = std::find_if(edges.begin(), edges.end(),
+                                           [&](const GridEdge &e)
+                                           { return samePoint(e.a, current); });
+                    if (it == edges.end())
+                    {
+                        it = std::find_if(edges.begin(), edges.end(),
+                                          [&](const GridEdge &e)
+                                          { return samePoint(e.b, current); });
+                        if (it == edges.end())
+                            break;
+                        current = it->a;
+                    }
+                    else
+                    {
+                        current = it->b;
+                    }
+                    edges.erase(it);
+                }
+
+                if (ring.size() >= 4)
+                {
+                    double area = polygonArea(ring);
+                    if (area > best_area)
+                    {
+                        best_area = area;
+                        best = ring;
+                    }
+                }
+            }
+
+            return best;
+        }
     }
 
     OnnxSegFormerAI::OnnxSegFormerAI(Ort::Env &env,
@@ -30,6 +114,8 @@ namespace rs
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(intra_op_threads);
         opts.SetInterOpNumThreads(1);
+        opts.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+        opts.DisableCpuMemArena();
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
         session_ = std::make_unique<Ort::Session>(env, model_path.c_str(), opts);
@@ -268,12 +354,9 @@ namespace rs
                 if (best_class == BACKGROUND_CLASS || best_votes < MIN_LOCAL_PIXELS)
                     continue;
 
-                int min_x = x_end;
-                int min_y = y_end;
-                int max_x = bx;
-                int max_y = by;
                 float conf_sum = 0.0f;
                 int count = 0;
+                bool selected[LOCAL_BOX_CELLS][LOCAL_BOX_CELLS] = {};
 
                 for (int y = by; y < y_end; y++)
                 {
@@ -283,10 +366,7 @@ namespace rs
                         if (labels[idx] != best_class || confidences[idx] < conf_thresh_)
                             continue;
 
-                        min_x = std::min(min_x, x);
-                        min_y = std::min(min_y, y);
-                        max_x = std::max(max_x, x);
-                        max_y = std::max(max_y, y);
+                        selected[y - by][x - bx] = true;
                         conf_sum += confidences[idx];
                         count++;
                     }
@@ -296,28 +376,69 @@ namespace rs
                     continue;
 
                 float avg_conf = conf_sum / count;
-                float mx0 = min_x * cell_w;
-                float my0 = min_y * cell_h;
-                float mx1 = (max_x + 1) * cell_w;
-                float my1 = (max_y + 1) * cell_h;
 
-                float tx0 = (mx0 - info.pad_x) / info.scale;
-                float ty0 = (my0 - info.pad_y) / info.scale;
-                float tx1 = (mx1 - info.pad_x) / info.scale;
-                float ty1 = (my1 - info.pad_y) / info.scale;
+                auto isSelected = [&](int gx, int gy)
+                {
+                    if (gx < bx || gx >= x_end || gy < by || gy >= y_end)
+                        return false;
+                    return selected[gy - by][gx - bx];
+                };
 
-                tx0 = std::clamp(tx0, 0.0f, (float)tile_w);
-                ty0 = std::clamp(ty0, 0.0f, (float)tile_h);
-                tx1 = std::clamp(tx1, 0.0f, (float)tile_w);
-                ty1 = std::clamp(ty1, 0.0f, (float)tile_h);
+                std::vector<GridEdge> edges;
+                edges.reserve(count * 4);
+                for (int y = by; y < y_end; y++)
+                {
+                    for (int x = bx; x < x_end; x++)
+                    {
+                        if (!isSelected(x, y))
+                            continue;
 
-                if (tx1 <= tx0 || ty1 <= ty0)
+                        if (!isSelected(x, y - 1))
+                            edges.push_back({{x, y}, {x + 1, y}});
+                        if (!isSelected(x + 1, y))
+                            edges.push_back({{x + 1, y}, {x + 1, y + 1}});
+                        if (!isSelected(x, y + 1))
+                            edges.push_back({{x + 1, y + 1}, {x, y + 1}});
+                        if (!isSelected(x - 1, y))
+                            edges.push_back({{x, y + 1}, {x, y}});
+                    }
+                }
+
+                std::vector<GridPoint> ring = largestBoundaryRing(std::move(edges));
+                if (ring.size() < 4)
                     continue;
 
                 Detection det;
-                det.bbox = {tx0, ty0, tx1 - tx0, ty1 - ty0};
                 det.class_id = best_class;
                 det.confidence = avg_conf;
+
+                float min_tx = (float)tile_w;
+                float min_ty = (float)tile_h;
+                float max_tx = 0.0f;
+                float max_ty = 0.0f;
+                det.polygon.reserve(ring.size());
+
+                for (const auto &p : ring)
+                {
+                    float mx = p.x * cell_w;
+                    float my = p.y * cell_h;
+                    float tx = (mx - info.pad_x) / info.scale;
+                    float ty = (my - info.pad_y) / info.scale;
+
+                    tx = std::clamp(tx, 0.0f, (float)tile_w);
+                    ty = std::clamp(ty, 0.0f, (float)tile_h);
+
+                    min_tx = std::min(min_tx, tx);
+                    min_ty = std::min(min_ty, ty);
+                    max_tx = std::max(max_tx, tx);
+                    max_ty = std::max(max_ty, ty);
+                    det.polygon.push_back({tx, ty});
+                }
+
+                if (max_tx <= min_tx || max_ty <= min_ty || det.polygon.size() < 4)
+                    continue;
+
+                det.bbox = {min_tx, min_ty, max_tx - min_tx, max_ty - min_ty};
                 dets.push_back(det);
             }
         }
