@@ -46,9 +46,13 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
     async function handleFileChange(e) {
         const file = e.target.files[0];
         if (!file) return;
+        e.target.value = "";
+        if (pollingRef.current)
+            clearInterval(pollingRef.current);
 
         addLog(`Uploading ${file.name} (${(file.size / 1e6).toFixed(1)}MB)...`);
         setStatus("uploading");
+        setProgress(0);
 
         try {
             const r = await uploadFile(file);
@@ -95,9 +99,13 @@ export default function ControlPanel({ onResults, onSessionChange, onModelChange
                 } else if (s.status === "ERROR") {
                     clearInterval(pollingRef.current);
                     setStatus("error");
-                    addLog("Pipeline ERROR.");
+                    addLog(`Pipeline ERROR${s.error_message ? `: ${s.error_message}` : "."}`);
                 }
-            } catch (_) { }
+            } catch (err) {
+                clearInterval(pollingRef.current);
+                setStatus("error");
+                addLog(`Status polling failed: ${err.message}`);
+            }
         }, 1000);
     }
 

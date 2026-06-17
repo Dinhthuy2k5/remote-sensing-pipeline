@@ -5,6 +5,10 @@
 
 namespace rs
 {
+    namespace
+    {
+        const char *EMPTY_FEATURE_COLLECTION = "{\"type\":\"FeatureCollection\",\"features\":[]}";
+    }
 
     PostGISClient::PostGISClient(const std::string &conn_str)
         : conn_str_(conn_str)
@@ -182,7 +186,7 @@ namespace rs
     std::string PostGISClient::queryDetectionsGeoJSON(int64_t session_id)
     {
         if (!isConnected() && !reconnect())
-            return "{}";
+            return EMPTY_FEATURE_COLLECTION;
         try
         {
             pqxx::nontransaction ntxn(*conn_);
@@ -204,14 +208,14 @@ namespace rs
                 ") FROM detections WHERE session_id = $1",
                 session_id);
             if (r.empty() || r[0][0].is_null())
-                return "{}";
+                return EMPTY_FEATURE_COLLECTION;
             return r[0][0].as<std::string>();
         }
         catch (const std::exception &e)
         {
             LOG_ERROR("PostGISClient",
                       std::string("queryDetectionsGeoJSON failed: ") + e.what());
-            return "{}";
+            return EMPTY_FEATURE_COLLECTION;
         }
     }
 
