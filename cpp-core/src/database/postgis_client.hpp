@@ -32,7 +32,9 @@ namespace rs
         bool insertDetections(const std::vector<GeoDetection> &detections);
 
         // Query — trả GeoJSON string
-        std::string queryDetectionsGeoJSON(int64_t session_id);
+        std::string queryDetectionsGeoJSON(
+            int64_t session_id,
+            const std::vector<GeoPoint> &footprint = {});
 
     private:
         std::string conn_str_;

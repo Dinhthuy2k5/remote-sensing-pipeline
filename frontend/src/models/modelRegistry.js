@@ -89,3 +89,27 @@ export function classStats(geojson, modelKey) {
     }
     return [...counts.values()].sort((a, b) => b.count - a.count);
 }
+
+export function landCoverCoverageStats(geojson, modelKey) {
+    const classes = (geojson?.coverage?.classes ?? []).map(item => ({
+        classId: item.class_id,
+        name: className(modelKey, item.class_id),
+        color: classColor(item.class_id, modelKey),
+        area: item.area_m2 ?? 0,
+        percent: item.percent ?? 0,
+    }));
+
+    if (!geojson?.coverage) return [];
+
+    classes.push({
+        classId: "unclassified",
+        name: "Unclassified",
+        color: "#cbd5e1",
+        area: Math.max(0,
+            (geojson.coverage.footprint_area_m2 ?? 0)
+            - (geojson.coverage.classified_area_m2 ?? 0)),
+        percent: geojson.coverage.unclassified_percent ?? 0,
+    });
+
+    return classes.sort((a, b) => b.percent - a.percent);
+}

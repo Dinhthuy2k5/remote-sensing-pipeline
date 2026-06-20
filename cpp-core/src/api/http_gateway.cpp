@@ -96,6 +96,9 @@ namespace rs
             {"tile_done", info.tile_done},
             {"progress", progress}};
 
+        if (!info.error_message.empty())
+            j["error_message"] = info.error_message;
+
         if (info.footprint.size() >= 4)
         {
             json ring = json::array();

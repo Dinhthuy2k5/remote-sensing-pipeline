@@ -92,6 +92,7 @@ public:
         if (ctx->pool)
             ctx->pool->requestStop();
         ctx->info.status = rs::SessionStatus::ERROR;
+        ctx->info.error_message = "Cancelled by user.";
         return true;
     }
 
@@ -119,10 +120,32 @@ bool dbInsertDetections(rs::PostGISClient &db, std::mutex &db_mutex, const std::
     return db.insertDetections(detections);
 }
 
-std::string dbQueryDetections(rs::PostGISClient &db, std::mutex &db_mutex, int64_t session_id)
+std::string dbQueryDetections(
+    rs::PostGISClient &db,
+    std::mutex &db_mutex,
+    int64_t session_id,
+    const std::vector<rs::GeoPoint> &footprint)
 {
     std::lock_guard<std::mutex> lock(db_mutex);
-    return db.queryDetectionsGeoJSON(session_id);
+    return db.queryDetectionsGeoJSON(session_id, footprint);
+}
+
+void markSessionError(
+    const std::shared_ptr<SessionContext> &ctx,
+    rs::PostGISClient &db,
+    std::mutex &db_mutex,
+    int64_t session_id,
+    const std::string &message)
+{
+    LOG_ERROR("Pipeline", message);
+    if (ctx)
+    {
+        std::lock_guard<std::mutex> lk(ctx->mutex);
+        ctx->info.status = rs::SessionStatus::ERROR;
+        ctx->info.error_message = message;
+    }
+    if (session_id > 0 && !dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::ERROR))
+        LOG_WARN("Pipeline", "Failed to persist ERROR status for session " + std::to_string(session_id));
 }
 
 void runPipelineAsync(
@@ -131,6 +154,9 @@ void runPipelineAsync(
     std::mutex &db_mutex,
     Ort::Env &ort_env)
 {
+    int64_t session_id = ctx ? ctx->info.id : -1;
+    try
+    {
     rs::PipelineConfig cfg;
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -141,20 +167,17 @@ void runPipelineAsync(
     std::string err;
     if (!rs::TilingEngine::validateFile(ctx->filepath, err))
     {
-        LOG_ERROR("Pipeline", err);
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-        ctx->info.status = rs::SessionStatus::ERROR;
+        markSessionError(ctx, db, db_mutex, session_id, err);
         return;
     }
     if (!engine.open(ctx->filepath))
     {
-        std::lock_guard<std::mutex> lock(ctx->mutex);
-        ctx->info.status = rs::SessionStatus::ERROR;
+        markSessionError(ctx, db, db_mutex, session_id, "Failed to open GeoTIFF.");
         return;
     }
 
     // Dùng ID đã có từ lúc upload — KHÔNG tạo session mới
-    int64_t session_id = ctx->info.id;
+    session_id = ctx->info.id;
 
     {
         std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -162,8 +185,9 @@ void runPipelineAsync(
         ctx->info.status = rs::SessionStatus::TILING;
     }
 
-    // Update tile_total vào DB
-    dbUpdateProgress(db, db_mutex, session_id, 0);
+    // Update tile_total vao DB; DB failure should not crash the pipeline.
+    if (!dbUpdateProgress(db, db_mutex, session_id, 0))
+        LOG_WARN("Pipeline", "Failed to persist initial progress for session " + std::to_string(session_id));
 
     rs::CoordinateMapper mapper(engine.metadata());
     {
@@ -187,7 +211,10 @@ void runPipelineAsync(
     }
 
     std::atomic<int> tiles_done{0};
+    std::atomic<bool> worker_failed{false};
     std::mutex results_mutex;
+    std::mutex error_mutex;
+    std::string error_message;
     std::vector<rs::GeoDetection> all_geo_dets;
 
     {
@@ -198,7 +225,7 @@ void runPipelineAsync(
     // Tạo AI pool — mỗi worker 1 instance
     int n_workers = ctx->pool->workerCount();
     int n_ai_instances = cfg.model == "segformer_loveda"
-                             ? std::min(n_workers, 4)
+                             ? std::min(n_workers, 5)
                              : n_workers;
     std::vector<std::unique_ptr<rs::AIInterface>> ai_pool;
     std::vector<std::unique_ptr<std::mutex>> ai_mutexes;
@@ -265,6 +292,7 @@ void runPipelineAsync(
 
     ctx->pool->start([&](rs::TileData &tile, int worker_id)
                      {
+    try {
     int ai_idx = worker_id % (int)ai_pool.size();
     std::vector<rs::Detection> dets;
     {
@@ -287,7 +315,39 @@ void runPipelineAsync(
         ctx->info.tile_done = done;
     }
     if (db.isConnected() && done % 20 == 0)
-        dbUpdateProgress(db, db_mutex, session_id, done); });
+    {
+        if (!dbUpdateProgress(db, db_mutex, session_id, done))
+            LOG_WARN("Pipeline", "Failed to persist progress for session " + std::to_string(session_id));
+    }
+    } catch (const std::exception& e) {
+        {
+            std::lock_guard<std::mutex> lk(error_mutex);
+            if (error_message.empty())
+                error_message = std::string("Worker ") + std::to_string(worker_id) + " failed: " + e.what();
+        }
+        worker_failed.store(true);
+        ctx->cancel_requested.store(true);
+        pool->requestStop();
+        {
+            std::lock_guard<std::mutex> lk(ctx->mutex);
+            ctx->info.status = rs::SessionStatus::ERROR;
+            ctx->info.error_message = error_message;
+        }
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lk(error_mutex);
+            if (error_message.empty())
+                error_message = std::string("Worker ") + std::to_string(worker_id) + " failed with unknown exception.";
+        }
+        worker_failed.store(true);
+        ctx->cancel_requested.store(true);
+        pool->requestStop();
+        {
+            std::lock_guard<std::mutex> lk(ctx->mutex);
+            ctx->info.status = rs::SessionStatus::ERROR;
+            ctx->info.error_message = error_message;
+        }
+    } });
 
     engine.iterateTiles(session_id, [&](rs::TileData tile)
                         {
@@ -297,13 +357,19 @@ void runPipelineAsync(
     // ─── Fan-In point: tất cả Worker đã xong ─────────────────────
     pool->waitAll();
 
-    if (ctx->cancel_requested.load())
+    if (worker_failed.load() || ctx->cancel_requested.load())
     {
+        std::string msg;
         {
             std::lock_guard<std::mutex> lk(ctx->mutex);
             ctx->info.status = rs::SessionStatus::ERROR;
+            if (ctx->info.error_message.empty())
+                ctx->info.error_message = worker_failed.load() ? "Worker failed." : "Pipeline cancelled.";
+            msg = ctx->info.error_message;
         }
-        dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::ERROR);
+        if (!dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::ERROR))
+            LOG_WARN("Pipeline", "Failed to persist ERROR status after abort.");
+        LOG_ERROR("Pipeline", "Session " + std::to_string(session_id) + " aborted: " + msg);
         engine.close();
         return;
     }
@@ -323,8 +389,14 @@ void runPipelineAsync(
         ctx->info.status = rs::SessionStatus::SAVING;
     }
 
-    dbInsertDetections(db, db_mutex, final_dets);
-    dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::DONE);
+    if (!dbInsertDetections(db, db_mutex, final_dets))
+    {
+        markSessionError(ctx, db, db_mutex, session_id, "Failed to insert detections into PostGIS.");
+        engine.close();
+        return;
+    }
+    if (!dbUpdateStatus(db, db_mutex, session_id, rs::SessionStatus::DONE))
+        LOG_WARN("Pipeline", "Failed to persist DONE status for session " + std::to_string(session_id));
 
     {
         std::lock_guard<std::mutex> lk(ctx->mutex);
@@ -336,6 +408,15 @@ void runPipelineAsync(
              "Session " + std::to_string(session_id) + " DONE. Detections: " + std::to_string(final_dets.size()) + "/" + std::to_string(all_geo_dets.size()) + " (after NMS)");
 
     engine.close();
+    }
+    catch (const std::exception &e)
+    {
+        markSessionError(ctx, db, db_mutex, session_id, std::string("Pipeline exception: ") + e.what());
+    }
+    catch (...)
+    {
+        markSessionError(ctx, db, db_mutex, session_id, "Pipeline failed with unknown exception.");
+    }
 }
 
 // ─── main ─────────────────────────────────────────────────────
@@ -475,6 +556,7 @@ int main()
             return false;
         }
         ctx->cancel_requested.store(false);
+        ctx->info.error_message.clear();
         ctx->info.status = rs::SessionStatus::LOADING;
     }
 
@@ -501,15 +583,19 @@ int main()
             if (ctx->pool)
                 ctx->pool->requestStop();
             ctx->info.status = rs::SessionStatus::ERROR;
+            ctx->info.error_message = "Cancelled by user.";
         }
-        dbUpdateStatus(db, db_mutex, sid, rs::SessionStatus::ERROR);
+        if (!dbUpdateStatus(db, db_mutex, sid, rs::SessionStatus::ERROR))
+            LOG_WARN("main", "Failed to persist cancel status for session " + std::to_string(sid));
         return true; });
 
     gateway.onStatus([&](int64_t sid) -> rs::SessionInfo
                      { return sessions.getInfo(sid); });
 
     gateway.onResults([&](int64_t sid) -> std::string
-                      { return dbQueryDetections(db, db_mutex, sid); });
+                      {
+        auto info = sessions.getInfo(sid);
+        return dbQueryDetections(db, db_mutex, sid, info.footprint); });
 
     // ── Log endpoints ─────────────────────────────────────────
     LOG_INFO("main", "API endpoints:");
