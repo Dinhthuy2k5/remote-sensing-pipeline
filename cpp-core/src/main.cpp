@@ -120,10 +120,14 @@ bool dbInsertDetections(rs::PostGISClient &db, std::mutex &db_mutex, const std::
     return db.insertDetections(detections);
 }
 
-std::string dbQueryDetections(rs::PostGISClient &db, std::mutex &db_mutex, int64_t session_id)
+std::string dbQueryDetections(
+    rs::PostGISClient &db,
+    std::mutex &db_mutex,
+    int64_t session_id,
+    const std::vector<rs::GeoPoint> &footprint)
 {
     std::lock_guard<std::mutex> lock(db_mutex);
-    return db.queryDetectionsGeoJSON(session_id);
+    return db.queryDetectionsGeoJSON(session_id, footprint);
 }
 
 void markSessionError(
@@ -589,7 +593,9 @@ int main()
                      { return sessions.getInfo(sid); });
 
     gateway.onResults([&](int64_t sid) -> std::string
-                      { return dbQueryDetections(db, db_mutex, sid); });
+                      {
+        auto info = sessions.getInfo(sid);
+        return dbQueryDetections(db, db_mutex, sid, info.footprint); });
 
     // ── Log endpoints ─────────────────────────────────────────
     LOG_INFO("main", "API endpoints:");

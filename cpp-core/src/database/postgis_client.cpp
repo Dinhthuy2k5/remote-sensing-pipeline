@@ -1,5 +1,6 @@
 #include "database/postgis_client.hpp"
 #include "common/logger.hpp"
+#include "nlohmann/json.hpp"
 #include <sstream>
 #include <iomanip>
 
@@ -183,7 +184,9 @@ namespace rs
         }
     }
 
-    std::string PostGISClient::queryDetectionsGeoJSON(int64_t session_id)
+    std::string PostGISClient::queryDetectionsGeoJSON(
+        int64_t session_id,
+        const std::vector<GeoPoint> &footprint)
     {
         if (!isConnected() && !reconnect())
             return EMPTY_FEATURE_COLLECTION;
@@ -209,7 +212,65 @@ namespace rs
                 session_id);
             if (r.empty() || r[0][0].is_null())
                 return EMPTY_FEATURE_COLLECTION;
-            return r[0][0].as<std::string>();
+
+            auto result = nlohmann::json::parse(r[0][0].as<std::string>());
+            std::string footprint_wkt = toWKT(footprint);
+            if (footprint_wkt.empty())
+                return result.dump();
+
+            // Assign cross-class overlap to the class with the stronger maximum
+            // confidence so the class coverages form a disjoint partition.
+            auto coverage = ntxn.exec_params(
+                "WITH footprint AS ("
+                "  SELECT ST_MakeValid(ST_GeomFromText($2, 4326)) AS geom"
+                "), clipped AS ("
+                "  SELECT d.class_id, d.confidence,"
+                "         ST_Intersection(ST_MakeValid(d.geom), f.geom) AS geom"
+                "  FROM detections d CROSS JOIN footprint f"
+                "  WHERE d.session_id = $1 AND ST_Intersects(d.geom, f.geom)"
+                "), class_unions AS ("
+                "  SELECT class_id, MAX(confidence) AS priority,"
+                "         ST_UnaryUnion(ST_Collect(geom)) AS geom"
+                "  FROM clipped WHERE NOT ST_IsEmpty(geom) GROUP BY class_id"
+                "), disjoint_classes AS ("
+                "  SELECT c.class_id, ST_Difference("
+                "    c.geom, COALESCE(("
+                "      SELECT ST_UnaryUnion(ST_Collect(h.geom))"
+                "      FROM class_unions h"
+                "      WHERE h.priority > c.priority"
+                "         OR (h.priority = c.priority AND h.class_id < c.class_id)"
+                "    ), ST_GeomFromText('POLYGON EMPTY', 4326))"
+                "  ) AS geom"
+                "  FROM class_unions c"
+                "), class_areas AS ("
+                "  SELECT class_id, ST_Area("
+                "    ST_CollectionExtract(ST_MakeValid(geom), 3)::geography"
+                "  ) AS area_m2"
+                "  FROM disjoint_classes WHERE NOT ST_IsEmpty(geom)"
+                "), footprint_area AS ("
+                "  SELECT ST_Area(geom::geography) AS area_m2 FROM footprint"
+                ")"
+                "SELECT json_build_object("
+                "  'footprint_area_m2', fa.area_m2,"
+                "  'classified_area_m2', COALESCE((SELECT SUM(area_m2) FROM class_areas), 0),"
+                "  'unclassified_percent', GREATEST(0, 100 - COALESCE(("
+                "    SELECT SUM(area_m2) * 100.0 / NULLIF(fa.area_m2, 0) FROM class_areas"
+                "  ), 0)),"
+                "  'classes', COALESCE(("
+                "    SELECT json_agg(json_build_object("
+                "      'class_id', class_id,"
+                "      'area_m2', area_m2,"
+                "      'percent', area_m2 * 100.0 / NULLIF(fa.area_m2, 0)"
+                "    ) ORDER BY area_m2 DESC) FROM class_areas"
+                "  ), '[]'::json)"
+                ") FROM footprint_area fa",
+                session_id, footprint_wkt);
+
+            if (!coverage.empty() && !coverage[0][0].is_null())
+                result["coverage"] = nlohmann::json::parse(
+                    coverage[0][0].as<std::string>());
+
+            return result.dump();
         }
         catch (const std::exception &e)
         {

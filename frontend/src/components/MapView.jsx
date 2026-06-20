@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { classColor, classStats, modelInfo } from "../models/modelRegistry";
+import { classColor, classStats, landCoverCoverageStats, modelInfo } from "../models/modelRegistry";
 
 function collectCoordinates(geometry, out = []) {
     if (!geometry) return out;
@@ -48,7 +48,10 @@ export default function MapView({ geojson, modelKey = "mock" }) {
     const mapInst = useRef(null);
     const sourceIds = useRef([]);
     const footprintSourceId = "image-footprint";
-    const stats = classStats(geojson, modelKey);
+    const useAreaStats = modelKey === "segformer_loveda";
+    const stats = useAreaStats
+        ? landCoverCoverageStats(geojson, modelKey)
+        : classStats(geojson, modelKey);
 
     useEffect(() => {
         mapInst.current = new maplibregl.Map({
@@ -167,7 +170,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                     borderBottom: "1px solid #45475a",
                     paddingBottom: 4,
                 }}>
-                    {modelInfo(modelKey).label}
+                    {useAreaStats ? "Land Cover Coverage" : modelInfo(modelKey).label}
                 </div>
 
                 {stats.length > 0 ? stats.slice(0, 8).map(item => (
@@ -182,7 +185,7 @@ export default function MapView({ geojson, modelKey = "mock" }) {
                         }} />
                         <span style={{ minWidth: 0 }}>{item.name}</span>
                         <span style={{ marginLeft: "auto", color: "#a6adc8" }}>
-                            {item.count}
+                            {useAreaStats ? `${item.percent.toFixed(1)}%` : item.count}
                         </span>
                     </div>
                 )) : (

@@ -103,7 +103,9 @@ namespace rs
     };
 
     struct SessionInfo
-    // "Bảng điều khiển" tổng hợp trạng thái hiện tại. Cấu trúc này dùng để trả về cho Frontend qua API GET /status, giúp giao diện biết tiến độ cắt ảnh (tile_done / tile_total) để vẽ thanh tiến trình (progress bar).
+    // "Bảng điều khiển" tổng hợp trạng thái hiện tại. Cấu trúc này dùng để trả về cho Frontend
+    // qua API GET /status, giúp giao diện biết tiến độ cắt ảnh (tile_done / tile_total) để vẽ
+    //  thanh tiến trình (progress bar).
     {
         int64_t id;
         std::string filename;
