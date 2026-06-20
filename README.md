@@ -18,6 +18,7 @@ Runtime.
 - [Processing lifecycle](#processing-lifecycle)
 - [Technology stack](#technology-stack)
 - [Repository layout](#repository-layout)
+- [Documentation](#documentation)
 - [Quick start](#quick-start)
 - [Using the HTTP API](#using-the-http-api)
 - [Models](#models)
@@ -48,39 +49,36 @@ Runtime.
 ## Architecture
 
 ```mermaid
-flowchart LR
-    Browser["React + MapLibre browser UI"]
-    Bridge["Node.js UDP-to-WebSocket bridge"]
+flowchart TB
+    UI["Browser dashboard<br/>React + MapLibre"]
+    Core["C++ core<br/>HTTP API + processing pipeline"]
+    DB[("PostGIS<br/>sessions + polygons")]
+    Files[("Session storage<br/>GeoTIFF files")]
+    Bridge["Telemetry bridge<br/>UDP to WebSocket"]
 
-    subgraph Core["C++ core service"]
-        API["cpp-httplib API gateway"]
-        Disk["Session storage /tmp/sessions"]
-        Tiler["GDAL tiling producer"]
-        Queue["Bounded TileQueue"]
-        Workers["ThreadPool workers"]
-        AI["MockAI or ONNX Runtime sessions"]
-        Mapper["CoordinateMapper to EPSG:4326"]
-        Results["In-memory GeoDetection collection"]
-        Stitcher["Class-aware NMS"]
-        UDP["UDP telemetry broadcaster"]
+    UI -->|"HTTP: upload, control, results"| Core
+    Core -->|"stream/read"| Files
+    Core -->|"SQL/WKT"| DB
+    Core -. "UDP metrics" .-> Bridge
+    Bridge -. "WebSocket" .-> UI
+```
 
-        API -->|stream upload| Disk
-        Disk --> Tiler
-        Tiler -->|blocking submit| Queue
-        Queue --> Workers
-        Workers --> AI
-        AI --> Mapper
-        Mapper --> Results
-        Results --> Stitcher
-        UDP -. metrics .-> Bridge
-    end
+Inside the C++ core, one pipeline thread produces tiles while a worker pool
+consumes them:
 
-    DB[("PostGIS")]
+```mermaid
+flowchart TB
+    Upload["Uploaded GeoTIFF on disk"]
+    Tiler["GDAL windowed tiling"]
+    Queue["Bounded TileQueue<br/>capacity = workers x 2"]
+    Workers["ThreadPool workers"]
+    Infer["MockAI / ONNX inference"]
+    Map["Pixel polygons to WGS84"]
+    NMS["Global class-aware NMS"]
+    Save["PostGIS persistence"]
 
-    Browser -->|HTTP upload, config, status, results| API
-    Bridge -->|WebSocket :9091| Browser
-    Stitcher -->|batch insert| DB
-    API -->|GeoJSON and coverage query| DB
+    Upload --> Tiler --> Queue --> Workers
+    Workers --> Infer --> Map --> NMS --> Save
 ```
 
 ### Producer-consumer flow
@@ -170,6 +168,22 @@ At runtime, a session follows this practical flow:
 |-- data/samples/               # Local GeoTIFF samples; ignored by Git
 `-- docker-compose.yml
 ```
+
+## Documentation
+
+The README is the operational overview. These documents explain the source code
+and algorithms in more depth:
+
+- [System architecture](docs/ARCHITECTURE.md): components, data/control planes,
+  deployment boundaries, session ownership, and source-code map.
+- [Pipeline walkthrough](docs/PIPELINE.md): `runPipelineAsync()` from upload to
+  `DONE`, including data structures, error paths, and memory lifetime.
+- [Concurrency model](docs/CONCURRENCY.md): producer-consumer execution,
+  bounded-queue backpressure, workers, atomics, mutexes, cancellation, and
+  tuning.
+- [Inference and stitching](docs/INFERENCE_AND_STITCHING.md): model backends,
+  preprocessing/post-processing, coordinate mapping, NMS, PostGIS coverage,
+  and algorithmic limitations.
 
 ## Quick start
 
