@@ -1,288 +1,289 @@
-# Inference, Mapping, Stitching, and Coverage
+# Inference, Mapping, Stitching Và Coverage
 
-This document explains how model output becomes a geospatial polygon and why
-three different overlap treatments exist: model-local NMS, global stitching,
-and PostGIS coverage union.
+Tài liệu này giải thích cách output của model AI trở thành polygon địa lý, và vì sao hệ thống có ba lớp xử lý overlap: NMS cục bộ, stitching toàn cục và union/difference trong PostGIS coverage.
 
-## Common inference contract
+---
 
-Every backend implements
-[`AIInterface`](../cpp-core/src/inference/ai_interface.hpp):
+## 1. Contract Chung Của AI Backend
+
+Mọi backend implement [`AIInterface`](../cpp-core/src/inference/ai_interface.hpp):
 
 ```cpp
 virtual std::vector<Detection> infer(const TileData &tile) = 0;
 virtual std::string name() const = 0;
 ```
 
-The rest of the pipeline therefore sees only `Detection`, regardless of model
-framework or output tensor layout.
+Pipeline phía sau chỉ nhìn thấy `Detection`, không phụ thuộc model framework hoặc layout tensor cụ thể.
 
-## Available backends
+---
 
-| Backend | Model input | Output used by this project | Intended domain |
+## 2. Backend Hiện Có
+
+| Backend | Input model | Output dùng trong project | Miền phù hợp |
 | --- | --- | --- | --- |
-| `MockAI` | Any tile | Deterministic synthetic boxes | Pipeline testing |
-| `OnnxAI` | 640 x 640, three duplicated grayscale channels | COCO boxes; segmentation prototypes are not decoded | ONNX integration demo |
-| `OnnxObbAI` | 1024 x 1024 RGB | Four rotated corners and DOTA class | High-resolution aerial objects |
-| `OnnxSegFormerAI` | 512 x 512 RGB, ImageNet normalization | LoveDA local mask contours | Land-cover segmentation |
+| `MockAI` | Bất kỳ tile | Box giả lập deterministic | Test pipeline |
+| `OnnxAI` | 640 x 640, 3 channel | COCO boxes, chưa decode prototype mask | Demo tích hợp ONNX |
+| `OnnxObbAI` | 1024 x 1024 RGB | 4 góc xoay + class DOTA | Vật thể ảnh hàng không độ phân giải cao |
+| `OnnxSegFormerAI` | 512 x 512 RGB, ImageNet normalization | Mask contour LoveDA | Land-cover segmentation |
 
-All ONNX backends currently use the CPU execution provider.
+Tất cả ONNX backend hiện dùng CPU Execution Provider.
 
-## Input channel behavior
+---
 
-`TilingEngine` reads every source band and converts it to one byte. Backends do
-not currently consume arbitrary multispectral channels:
+## 3. Hành Vi Kênh Input
 
-- one-band input is duplicated to three channels where required;
-- three-or-more-band input uses the first three bands;
-- a fourth NAIP NIR band or Sentinel-2 spectral bands are not used by the
-  provided models.
+`TilingEngine` đọc mọi band nguồn và convert về byte. Backend hiện chưa khai thác arbitrary multispectral channels:
 
-Correct band ordering is therefore the caller/data-preparation responsibility.
+- ảnh 1 band được duplicate sang 3 channel nếu cần;
+- ảnh >= 3 band dùng 3 band đầu;
+- band NIR của NAIP hoặc các band Sentinel-2 chưa được đưa vào model hiện tại.
 
-## Letterboxing
+Vì vậy band ordering và tiền xử lý dữ liệu vẫn là trách nhiệm của người chuẩn bị dữ liệu.
 
-DOTA and SegFormer preserve tile aspect ratio:
+---
+
+## 4. Letterbox
+
+DOTA và SegFormer giữ tỷ lệ tile:
 
 ```text
 scale = min(model_width / tile_width, model_height / tile_height)
 new size = round(tile size * scale)
-padding = remaining model canvas / 2
+padding = phần còn lại của model canvas / 2
 ```
 
-Post-processing reverses the transform:
+Post-processing đảo ngược:
 
 ```text
 tile_x = (model_x - pad_x) / scale
 tile_y = (model_y - pad_y) / scale
 ```
 
-Coordinates are clamped to the actual tile dimensions, which matters for edge
-tiles smaller than the configured tile size.
+Tọa độ được clamp vào kích thước tile thực tế, đặc biệt quan trọng với tile ở biên nhỏ hơn tile size cấu hình.
 
-## SegFormer preprocessing
+---
 
-The LoveDA backend:
+## 5. SegFormer Preprocessing
 
-1. bilinearly resizes the first three source bands;
-2. places the image on a black 512 x 512 letterbox canvas;
-3. converts HWC bytes to NCHW floats;
-4. scales bytes to `0..1`;
-5. applies ImageNet mean and standard deviation normalization.
+LoveDA backend:
 
-The ONNX output is expected to have rank four:
+1. Resize bilinear 3 band đầu.
+2. Đặt ảnh vào canvas 512 x 512 theo letterbox.
+3. Chuyển HWC byte sang NCHW float.
+4. Scale byte về `0..1`.
+5. Chuẩn hóa bằng ImageNet mean/std.
+
+Output ONNX kỳ vọng rank 4:
 
 ```text
 [batch, classes, output_height, output_width]
 ```
 
-The implementation requires exactly eight class channels:
+Project yêu cầu đúng 8 channel class:
 
 ```text
 0 Ignore, 1 Background, 2 Building, 3 Road,
 4 Water, 5 Barren, 6 Forest, 7 Agricultural
 ```
 
-## SegFormer post-processing
+---
 
-### Per-cell class and confidence
+## 6. SegFormer Post-processing
 
-For every output cell, the backend computes softmax across classes and keeps:
+### 6.1 Class và confidence theo cell
 
-- the argmax class;
-- its probability as confidence.
+Với mỗi output cell, backend tính softmax qua class:
 
-### Local blocks
+- `argmax` là class được chọn;
+- xác suất class đó là confidence.
 
-The output grid is processed in blocks of `4 x 4` cells. Inside each block:
+### 6.2 Local block
 
-1. Ignore, Background, and below-threshold cells are skipped.
-2. Remaining cells vote for a class.
-3. The class with most votes wins the block.
-4. At least two selected cells are required.
-5. Boundary edges are generated around selected cells.
-6. The largest closed boundary ring becomes one polygon.
+Output grid được xử lý theo block `4 x 4` cell:
 
-At most 256 detections are retained per tile, sorted by average confidence.
+1. Bỏ qua Ignore, Background và cell dưới `conf_thresh`.
+2. Các cell còn lại vote class.
+3. Class nhiều phiếu nhất thắng block.
+4. Block cần ít nhất hai cell hợp lệ.
+5. Sinh boundary edges quanh các cell được chọn.
+6. Vòng biên lớn nhất trở thành một polygon.
 
-This local vectorization keeps polygons manageable, but it is not equivalent to
-vectorizing one globally stitched semantic mask. Disconnected components inside
-one local block may lose smaller rings because only the largest ring is kept.
+Mỗi tile giữ tối đa 256 detections, sort theo confidence trung bình.
 
-## Pixel-to-geographic mapping
+Điểm cần nhớ: polygonize này là cục bộ theo tile/block, không phải vectorize một semantic mask toàn ảnh đã stitch.
 
-Model output coordinates are tile-local. `CoordinateMapper` first adds the tile
-offset to recover source-image pixels:
+---
+
+## 7. Pixel Sang Tọa Độ Địa Lý
+
+Model trả tọa độ tile-local. `CoordinateMapper` cộng offset để ra pixel ảnh gốc:
 
 ```text
 source_px = tile.pixel_x_offset + local_x
 source_py = tile.pixel_y_offset + local_y
 ```
 
-It then applies the six-value GDAL affine transform:
+Sau đó áp dụng affine transform của GDAL:
 
 ```text
 projected_x = gt[0] + px * gt[1] + py * gt[2]
 projected_y = gt[3] + px * gt[4] + py * gt[5]
 ```
 
-If the source CRS is projected, one OGR transform converts those coordinates to
-EPSG:4326. `OAMS_TRADITIONAL_GIS_ORDER` ensures stored points use longitude,
-latitude order.
+Nếu CRS nguồn là projected, OGR transform sang EPSG:4326. Điểm được lưu theo thứ tự longitude, latitude.
 
-If a detection supplies a polygon, every vertex is mapped. Otherwise, the four
-bbox corners are mapped. The same mechanism maps the four image corners to the
-GeoTIFF footprint.
+Nếu `Detection` có polygon, mapper chuyển toàn bộ vertex. Nếu không, mapper dùng bốn góc bbox. Cùng cơ chế này cũng tính footprint từ bốn góc ảnh.
 
-## Three overlap problems
+---
 
-Overlap exists for different reasons and is handled at different stages.
+## 8. Ba Vấn Đề Overlap
 
-### 1. Model-local duplicates
+### 8.1 Duplicate cục bộ trong model
 
-Generic YOLO post-processing performs tile-local NMS. It removes multiple
-anchors predicting the same object inside one tile.
+YOLO post-processing có NMS trong phạm vi một tile để loại nhiều anchor dự đoán cùng vật thể.
 
-### 2. Cross-tile duplicates
+### 8.2 Duplicate giữa các tile
 
-Configured tile overlap makes the same object or land region appear in adjacent
-tiles. After all workers finish, global `Stitcher::runNMS()` tries to remove
-duplicates across the full image.
+Tile overlap làm cùng một vật thể/vùng đất xuất hiện trong hai tile kề nhau. Sau khi worker xong, `Stitcher::runNMS()` xử lý duplicate trên toàn ảnh.
 
-### 3. Coverage double counting
+### 8.3 Đếm trùng diện tích coverage
 
-NMS does not guarantee disjoint geometry. Same-class low-IoU intersections and
-all cross-class intersections can remain. Coverage calculation therefore unions
-and partitions geometry at query time.
+NMS không đảm bảo geometry rời nhau. Same-class overlap dưới ngưỡng IoU và cross-class overlap vẫn có thể còn. Vì vậy coverage phải union/difference trong PostGIS khi query.
 
-These stages are related but not interchangeable.
+Ba bước này liên quan nhau nhưng không thay thế nhau.
 
-## Current global NMS
+---
 
-The stitcher:
+## 9. Global NMS Hiện Tại
 
-1. computes one axis-aligned lon/lat bbox for every polygon;
-2. sorts detections by descending confidence;
-3. accepts the strongest unsuppressed detection;
-4. compares it only with later detections of the same class;
-5. suppresses a candidate when bbox IoU is greater than `0.5`.
+Stitcher:
 
-For boxes `A` and `B`:
+1. Tính bbox lon/lat tạm cho mỗi polygon.
+2. Sort detection theo confidence giảm dần.
+3. Accept detection mạnh nhất chưa bị suppress.
+4. Chỉ so sánh với detection cùng class.
+5. Suppress candidate nếu bbox IoU > `0.5`.
 
 ```text
 IoU = intersection_area / (area(A) + area(B) - intersection_area)
 ```
 
-Complexity is worst-case `O(n^2)`. Bounding-box area is calculated in longitude
-and latitude degrees, not a projected metric CRS. This is acceptable as a local
-dedup heuristic but is not a precise geodesic polygon IoU.
+Lưu ý:
 
-### What NMS does not do
+- bbox chỉ là cấu trúc phụ trợ;
+- output vẫn là `GeoDetection` polygon WGS84;
+- diện tích bbox đang tính theo degree lon/lat, không phải CRS metric;
+- worst-case complexity là `O(n^2)`.
 
-- It does not union polygons.
-- It does not trim partial intersections.
-- It does not compare different classes.
-- It does not blend semantic probabilities across tiles.
-- It does not run concurrently with workers.
+### NMS không làm các việc sau
 
-## PostGIS persistence
+- Không union polygon.
+- Không cắt phần giao.
+- Không so sánh khác class.
+- Không blend semantic probability giữa tile.
+- Không chạy song song với worker.
 
-After NMS, `insertDetections()` converts each polygon into WKT:
+---
+
+## 10. Lưu Vào PostGIS
+
+Sau NMS, `insertDetections()` chuyển mỗi polygon sang WKT:
 
 ```text
 POLYGON((lon lat, lon lat, ..., first_lon first_lat))
 ```
 
-PostGIS constructs `GEOMETRY(Polygon, 4326)`. All rows are inserted inside one
-libpqxx transaction, so a failed transaction does not leave a partially saved
-result set.
+PostGIS tạo `GEOMETRY(Polygon, 4326)`. Tất cả row insert trong một libpqxx transaction, nên transaction fail sẽ không để lại một phần kết quả dang dở.
 
-## GeoJSON retrieval
+`postgis_data` persist database PostgreSQL/PostGIS, không persist object C++ trực tiếp.
 
-The result query uses `ST_AsGeoJSON(geom)` and aggregates rows into a standard
-FeatureCollection. Feature properties contain:
+---
 
-- database detection ID;
+## 11. Truy Vấn GeoJSON
+
+Result query dùng `ST_AsGeoJSON(geom)` và aggregate thành `FeatureCollection`.
+
+Feature properties gồm:
+
+- detection ID;
 - class ID;
 - confidence;
 - session ID.
 
-The frontend groups features by class and adds one MapLibre fill and outline
-layer per class.
+Frontend nhóm feature theo class và tạo fill/outline layer trong MapLibre.
 
-## Land-cover coverage
+---
 
-Coverage uses the GeoTIFF footprint as denominator:
+## 12. Land-cover Coverage
+
+Coverage dùng footprint GeoTIFF làm mẫu số:
 
 ```text
-class coverage = disjoint class area / footprint area * 100
+class coverage = diện tích class không chồng lặp / diện tích footprint * 100
 ```
 
-The SQL pipeline is:
+SQL pipeline:
 
 ```mermaid
 flowchart TB
-    Stored["Stored polygons"]
-    Clip["Clip to footprint"]
-    Union["Union by class"]
-    Resolve["Remove higher-priority class overlap"]
-    Area["ST_Area on geography"]
-    Percent["Coverage percentages"]
+    Stored["Polygon đã lưu"]
+    Clip["Cắt theo footprint"]
+    Union["Hợp nhất theo class"]
+    Resolve["Trừ overlap của class ưu tiên cao hơn"]
+    Area["ST_Area trên geography"]
+    Percent["Phần trăm coverage"]
 
     Stored --> Clip --> Union --> Resolve --> Area --> Percent
 ```
 
-In detail:
+Chi tiết:
 
-1. `ST_MakeValid` repairs input geometry when possible.
-2. `ST_Intersection` clips every detection to the footprint.
-3. `ST_UnaryUnion(ST_Collect(...))` removes duplicate area within each class.
-4. Class unions are ordered by maximum detection confidence, then class ID.
-5. `ST_Difference` assigns cross-class overlap to the higher-priority class.
-6. `ST_CollectionExtract(..., 3)` keeps polygonal output.
-7. `ST_Area(geometry::geography)` calculates square metres on Earth.
-8. `Unclassified` is footprint area minus summed disjoint class area.
+1. `ST_MakeValid` sửa geometry nếu có thể.
+2. `ST_Intersection` clip detection theo footprint.
+3. `ST_UnaryUnion(ST_Collect(...))` bỏ overlap trong cùng class.
+4. Class union được ưu tiên theo confidence lớn nhất, rồi class ID.
+5. `ST_Difference` gán cross-class overlap cho class ưu tiên cao hơn.
+6. `ST_CollectionExtract(..., 3)` giữ polygon output.
+7. `ST_Area(geometry::geography)` tính diện tích mét vuông.
+8. `Unclassified` = footprint area - tổng diện tích class đã phân vùng.
 
-The returned percentages form a partition and sum to approximately 100% after
-floating-point rounding.
+---
 
-### Meaning of Unclassified
+## 13. Ý Nghĩa Của Unclassified
 
-`Unclassified` is not the same as model error. It includes:
+`Unclassified` không đồng nghĩa với model sai. Nó gồm:
 
-- model Ignore and Background classes;
-- output below `conf_thresh`;
-- regions removed by minimum-cell rules;
-- smaller rings discarded by local contour extraction;
-- valid footprint regions for which no polygon was emitted.
+- class Ignore và Background;
+- output dưới `conf_thresh`;
+- vùng bị loại bởi minimum-cell rule;
+- ring nhỏ bị bỏ trong local contour extraction;
+- phần footprint không sinh polygon.
 
-Raising confidence increases Unclassified coverage. Comparing Unclassified
-against ground truth would require a labeled validation dataset.
+Tăng confidence thường làm Unclassified tăng. Muốn đánh giá accuracy cần ground truth và metric như mIoU/F1.
 
-## Why coverage still processes overlap after NMS
+---
 
-NMS removes only same-class detections with bbox IoU above 0.5. Therefore:
+## 14. Vì Sao Coverage Vẫn Xử Lý Overlap Sau NMS?
 
-- same-class overlap below the threshold remains;
-- different-class overlap always remains;
-- polygon intersections may exist even when bbox IoU is small.
+NMS chỉ loại detection cùng class có bbox IoU > 0.5. Do đó:
 
-Without PostGIS union/difference, intersecting areas would be counted more than
-once and class coverage plus Unclassified would not form a valid 100% partition.
+- same-class overlap dưới ngưỡng vẫn còn;
+- khác class luôn có thể overlap;
+- polygon có thể giao nhau dù bbox IoU nhỏ.
 
-## Recommended future semantic stitching
+Nếu không union/difference trong PostGIS, một vùng có thể bị tính diện tích nhiều lần và tổng coverage sẽ không tạo thành partition 100%.
 
-The correct long-term design for SegFormer is raster-first stitching:
+---
 
-1. keep class logits or probabilities for each tile;
-2. map them into a source-image output grid;
-3. blend overlap with weights that reduce tile-edge influence;
-4. select exactly one class per source pixel;
-5. vectorize the final global class mask;
-6. simplify polygons and persist them.
+## 15. Hướng Stitching Semantic Tốt Hơn
 
-That design removes cross-class overlap at its source, improves tile seams, and
-makes coverage a direct pixel-count or polygon-area calculation. It also
-requires a bounded output strategy for very large rasters, such as disk-backed
-mask blocks or streaming polygonization.
+Thiết kế dài hạn nên là raster-first stitching:
 
+1. Giữ logits/probability của từng tile.
+2. Map về output grid của ảnh gốc.
+3. Blend overlap với weight giảm ảnh hưởng biên tile.
+4. Chọn đúng một class cuối cùng cho mỗi pixel.
+5. Polygonize mask toàn cục.
+6. Simplify polygon và persist.
+
+Cách này xử lý seam và cross-class conflict tốt hơn, nhưng cần chiến lược output bounded cho ảnh rất lớn, ví dụ mask block trên disk hoặc streaming polygonization.

@@ -1,15 +1,16 @@
-# Concurrency and Backpressure
+# Đa Luồng Và Backpressure
 
-This document explains which threads exist, how they communicate, and which
-shared values require synchronization.
+Tài liệu này giải thích các thread trong hệ thống, cách chúng giao tiếp, và tài nguyên nào cần đồng bộ.
 
-## Thread topology
+---
+
+## 1. Topology Các Thread
 
 ```mermaid
 flowchart TB
     HTTP["HTTP server threads"]
-    Pipeline["One detached pipeline thread per started session"]
-    Producer["GDAL producer<br/>runs on pipeline thread"]
+    Pipeline["Detached pipeline thread<br/>mỗi session start"]
+    Producer["GDAL producer<br/>chạy trên pipeline thread"]
     Queue["Bounded TileQueue"]
     W1["Worker 0"]
     W2["Worker 1"]
@@ -21,214 +22,217 @@ flowchart TB
     Queue --> W1
     Queue --> W2
     Queue --> WN
-    UDP -. "reads protected metrics" .-> Pipeline
+    UDP -. "đọc metrics có bảo vệ" .-> Pipeline
 ```
 
-There is no separate tiling thread: the pipeline thread itself is the producer.
-Concurrency begins because `ThreadPool::start()` creates workers before
-`iterateTiles()` starts producing.
+Không có tiling thread riêng. Thread pipeline chính là producer. Đa luồng bắt đầu khi `ThreadPool::start()` tạo worker trước khi `iterateTiles()` sinh tile.
 
-## Bounded blocking queue
+---
 
-`ThreadSafeQueue<T>` uses:
+## 2. Bounded Blocking Queue
 
-- `std::queue<T>` for storage;
-- one mutex for queue state;
-- `cv_not_empty_` for consumers;
-- `cv_not_full_` for the producer;
-- a `closed_` flag for shutdown.
+`ThreadSafeQueue<T>` dùng:
 
-### Push
+- `std::queue<T>` để lưu item;
+- một mutex cho queue state;
+- `cv_not_empty_` cho consumer;
+- `cv_not_full_` cho producer;
+- cờ `closed_` cho shutdown/cancel.
+
+### Thao tác push
 
 ```text
 lock queue
-wait until queue has capacity OR queue is closed
-if closed: return false
-move item into queue
-notify one consumer
+wait đến khi queue còn chỗ hoặc queue đóng
+nếu closed: return false
+move item vào queue
+notify một consumer
 ```
 
-### Pop
+### Thao tác pop
 
 ```text
 lock queue
-wait until queue has an item OR queue is closed
-if closed and empty: return nullopt
-move front item out
-notify one producer
+wait đến khi queue có item hoặc queue đóng
+nếu closed và empty: return nullopt
+move front item ra ngoài
+notify một producer
 ```
 
-### Close
+### Thao tác close
 
-`close()` sets the flag and notifies both condition variables. This is important:
+`close()` set cờ và đánh thức cả producer lẫn consumer. Nhờ đó:
 
-- idle consumers wake and exit when no work remains;
-- a producer blocked on a full queue wakes and returns failure during cancel.
+- consumer đang chờ có thể thoát;
+- producer đang block vì queue đầy sẽ tỉnh dậy và trả failure khi cancel.
 
-## Why backpressure matters
+---
 
-Without a capacity limit, raster I/O can outrun CPU inference. Approximate queued
-memory would grow as:
+## 3. Vì Sao Cần Backpressure?
+
+Nếu queue không giới hạn, GDAL đọc ảnh có thể nhanh hơn AI inference. Khi đó RAM tăng theo:
 
 ```text
-queued memory = queued tiles * tile width * tile height * band count
+queued memory = số tile đang chờ * width * height * band_count
 ```
 
-For 1,024 x 1,024 four-band byte tiles, one tile is about 4 MiB. Thousands of
-queued tiles would consume gigabytes before inference catches up.
+Với tile `1024 x 1024`, 4 band, mỗi tile khoảng 4 MiB. Nếu hàng nghìn tile nằm chờ, RAM có thể tăng lên nhiều GB.
 
-The runtime sets:
+Runtime đặt:
 
 ```text
 queue capacity = worker count * 2
 ```
 
-With four workers, no more than eight tiles wait in the queue. Additional memory
-still exists in active workers, GDAL buffers, ONNX tensors, model weights, and
-result vectors, but source size no longer determines queue growth.
+Với 4 workers, tối đa 8 tile nằm chờ trong queue. RAM vẫn còn đến từ active worker, GDAL buffer, ONNX tensor, model weights và vector kết quả, nhưng queue không còn tăng theo kích thước ảnh nguồn.
 
-## Move semantics and ownership
+---
 
-`submit(TileData tile)` receives a value, then moves it into the queue. `pop()`
-moves it into a worker-local `optional<TileData>`. This avoids copying the large
-pixel vector at every boundary.
+## 4. Move Semantics Và Quyền Sở Hữu
 
-Only one worker owns a given `TileData`. The worker callback receives a mutable
-reference valid for that callback invocation. The tile and its pixel buffer are
-released when the loop advances.
+`submit(TileData tile)` nhận tile theo value, rồi move vào queue. `pop()` move tile ra `optional<TileData>` local của worker.
 
-## Synchronization inventory
+Ý nghĩa:
 
-| Shared resource | Primitive | Why it is needed |
+- không copy pixel vector lớn;
+- một tile chỉ có một owner tại một thời điểm;
+- pixel buffer được giải phóng khi worker callback kết thúc.
+
+---
+
+## 5. Inventory Đồng Bộ
+
+| Tài nguyên chia sẻ | Primitive | Lý do |
 | --- | --- | --- |
-| Queue contents and closed flag | Queue mutex + condition variables | Producer/consumer coordination |
-| Session config, status, footprint, pool pointer | `ctx->mutex` | HTTP, pipeline, cancel, and telemetry access |
-| Cancel request | `std::atomic<bool>` | Fast cooperative checks across threads |
-| Completed tile count | `std::atomic<int>` | Concurrent worker increments |
-| Worker failure flag | `std::atomic<bool>` | Fan-in failure decision |
-| First worker error string | `error_mutex` | Preserve one coherent message |
-| Global mapped result vector | `results_mutex` | Concurrent `push_back` from workers |
-| Individual AI backend | one mutex per AI slot | Prevent concurrent use when workers share a session |
-| PostGIS client | `db_mutex` | Serialize access to one libpqxx connection |
-| State-machine callbacks | internal callback mutex | Safe registration/notification |
+| Queue và cờ closed | Queue mutex + condition variables | Điều phối producer/consumer |
+| Session config, status, footprint, pool pointer | `ctx->mutex` | HTTP, pipeline, cancel và telemetry cùng đọc/ghi |
+| Yêu cầu cancel | `std::atomic<bool>` | Kiểm tra nhanh giữa nhiều thread |
+| Completed tile count | `std::atomic<int>` | Nhiều worker cùng tăng |
+| Cờ lỗi worker | `std::atomic<bool>` | Quyết định lỗi ở fan-in |
+| First worker error string | `error_mutex` | Giữ một error message ổn định |
+| `all_geo_dets` | `results_mutex` | Nhiều worker cùng `push_back` |
+| Mỗi AI backend | một mutex per AI slot | Tránh gọi đồng thời vào session dùng chung |
+| PostGIS client | `db_mutex` | Serialize một libpqxx connection |
+| StateMachine callbacks | callback mutex nội bộ | Đăng ký/thông báo an toàn |
 
-## Worker-to-AI mapping
+---
 
-Workers select an inference object with:
+## 6. Ánh Xạ Worker Sang AI Session
+
+Worker chọn AI object bằng:
 
 ```text
 ai_index = worker_id % ai_pool.size()
 ```
 
-If the number of AI instances equals the number of workers, every worker has a
-dedicated backend and its AI mutex has no contention. If there are fewer AI
-instances, multiple workers share an instance and serialize at that mutex.
+Nếu số AI instance bằng số worker, mỗi worker có backend riêng. Nếu AI instance ít hơn worker, nhiều worker chia sẻ một instance và tuần tự hóa tại mutex của AI đó.
 
-SegFormer currently uses:
+SegFormer hiện dùng:
 
 ```text
 AI instances = min(worker count, 5)
 ```
 
-This cap limits model-session memory. Creating more worker threads than AI
-instances may still overlap mapping and bookkeeping, but it does not increase
-simultaneous inference beyond the AI pool size.
+Mục đích là giới hạn bộ nhớ model session. Tăng worker vượt số AI instance không làm tăng số inference chạy đồng thời, nhưng vẫn có thể overlap phần mapping/bookkeeping.
 
-## ONNX threading strategy
+---
 
-SegFormer configures each session with:
+## 7. Chiến Lược Thread Cho ONNX
 
-- one intra-op thread;
-- one inter-op thread;
-- sequential execution mode;
-- CPU memory arena disabled;
-- full graph optimization.
+SegFormer cấu hình mỗi ONNX session:
 
-The application obtains parallelism from multiple independent sessions rather
-than allowing every session to create a large internal CPU thread pool. This
-reduces thread oversubscription and made four application-level sessions more
-predictable on the development laptop.
+- `intra_op_threads = 1`;
+- `inter_op_threads = 1`;
+- execution mode sequential;
+- tắt CPU memory arena;
+- bật graph optimization.
 
-## Fan-in and orderly completion
+Cơ chế xử lý song song được tạo ở cấp nhiều ONNX session độc lập, tránh để mỗi session tự sinh nhiều thread nội bộ và gây oversubscription CPU.
 
-`waitAll()` is owned by the pipeline thread. It closes the queue and joins each
-worker exactly once. Workers continue draining items already accepted before
-the close. Only after the joins does the pipeline inspect failure/cancel flags
-and enter stitching.
+---
 
-This ordering prevents a false completion path where the producer continues
-submitting after workers have exited.
+## 8. Fan-in Và Hoàn Tất Có Trật Tự
 
-## Cancellation
+`waitAll()` do pipeline thread gọi:
 
-Cancellation is cooperative:
+1. close queue;
+2. cho worker xử lý nốt item đã nhận;
+3. join toàn bộ worker;
+4. clear worker handles;
+5. reset queue.
 
-1. HTTP sets `cancel_requested`.
-2. The queue is closed with `requestStop()`.
-3. A blocked producer wakes and `submit()` returns false.
-4. Idle workers wake; workers already inside inference finish their current
-   call because ONNX execution is not interrupted.
-5. The pipeline joins workers.
-6. The post-join check exits with `ERROR` instead of stitching or saving.
+Sau fan-in, pipeline mới kiểm tra `worker_failed` và `cancel_requested`, rồi mới quyết định có vào `STITCHING` hay không. Điều này tránh trường hợp báo `DONE` giả.
 
-The current API represents cancellation as `ERROR` with an explanatory message;
-there is no separate `CANCELLED` backend state.
+---
 
-## Worker exceptions
+## 9. Cơ Chế Cancel
 
-The worker lambda catches standard and unknown exceptions. The first failure:
+Cancel là cơ chế hợp tác:
 
-- stores a stable error message;
-- sets `worker_failed` and cancellation;
-- closes the queue;
-- marks session status `ERROR`.
+1. HTTP set `cancel_requested`.
+2. Queue đóng qua `requestStop()`.
+3. Producer đang block tỉnh dậy, `submit()` trả false.
+4. Worker idle thoát; worker đang inference sẽ hoàn thành call hiện tại.
+5. Pipeline join worker.
+6. Post-join check chuyển session sang `ERROR`, không stitching/saving.
 
-Other workers may finish calls already in progress, but no successful
-`STITCHING -> SAVING -> DONE` path is allowed after the fan-in check.
+Hiện API biểu diễn cancel bằng `ERROR` kèm message, chưa có state `CANCELLED` riêng.
 
-## Database serialization
+---
 
-All pipeline progress, status, inserts, and result queries share one
-`PostGISClient`. A process-level mutex protects the underlying libpqxx
-connection. This is safe but creates a database bottleneck:
+## 10. Exception Trong Worker
 
-- a large result query can delay progress updates;
-- only one database operation runs at a time;
-- it is not a substitute for a production connection pool.
+Worker lambda bắt exception chuẩn và unknown exception. Lỗi đầu tiên sẽ:
 
-## Performance tuning
+- lưu error message;
+- set `worker_failed`;
+- set cancel flag;
+- close queue;
+- mark session `ERROR`.
 
-Tune in this order:
+Các worker khác có thể hoàn thành call đang chạy, nhưng sau fan-in pipeline không được đi vào `STITCHING -> SAVING -> DONE`.
 
-1. Choose `tile_size` that matches model input and preserves useful spatial
-   context.
-2. Choose overlap large enough for boundary context but not so large that the
-   same area is inferred repeatedly.
-3. Increase AI instances while measuring peak RAM.
-4. Match worker count to AI instances unless non-inference work is significant.
-5. Inspect queue depth: a constantly full queue means inference is the
-   bottleneck; a constantly empty queue suggests I/O or preprocessing limits.
+---
 
-More workers are not automatically faster. They add:
+## 11. Tuần Tự Hóa Database
 
-- model sessions and weights;
-- active tile and tensor buffers;
-- result-lock contention;
-- database progress traffic;
-- CPU scheduling overhead.
+Toàn bộ cập nhật progress, cập nhật status, insert và query kết quả dùng chung một `PostGISClient`. `db_mutex` bảo vệ libpqxx connection.
 
-## Remaining concurrency limitations
+Điểm mạnh:
 
-- Pipeline threads are detached and are not joined during process shutdown.
-- The database has one serialized connection.
-- `all_geo_dets` has one global mutex and one global vector.
-- Stitching is single-threaded and begins only after complete fan-in.
-- Runtime status writes do not consistently use the standalone `StateMachine`.
-- Telemetry exposes one `active_session_id`; concurrent sessions are not fully
-  represented.
-- There is no scheduler limiting how many sessions may create workers and model
-  pools at the same time.
+- đơn giản;
+- tránh dùng một connection đồng thời từ nhiều thread.
 
-The bounded queue solves the most dangerous source-sized memory growth, but
-production multi-session scheduling remains separate work.
+Điểm yếu:
 
+- query lớn có thể chặn progress update;
+- chỉ một DB operation chạy tại một thời điểm;
+- chưa phải connection pool production.
+
+---
+
+## 12. Tuning Hiệu Năng
+
+Nên tuning theo thứ tự:
+
+1. Chọn `tile_size` phù hợp input model.
+2. Chọn overlap đủ lớn cho biên tile, nhưng tránh inference lặp quá nhiều.
+3. Tăng số AI instance và đo RAM peak.
+4. Match worker count với AI instance nếu inference là bottleneck.
+5. Quan sát queue depth:
+   - queue luôn đầy: inference chậm hơn producer;
+   - queue luôn rỗng: I/O/preprocessing có thể là bottleneck.
+
+Nhiều worker không luôn nhanh hơn. Nó làm tăng model sessions, active tile/tensor buffer, lock contention, DB traffic và scheduling overhead.
+
+---
+
+## 13. Hạn Chế Còn Lại
+
+- Thread pipeline detached, chưa join khi process shutdown.
+- Database chỉ có một serialized connection.
+- `all_geo_dets` là một vector global có mutex.
+- Stitching single-thread và chỉ bắt đầu sau khi fan-in xong.
+- Runtime chưa dùng `StateMachine` làm transition gate duy nhất.
+- Telemetry chỉ biểu diễn tốt một active session.
+- Chưa có scheduler giới hạn tổng số session chạy đồng thời.

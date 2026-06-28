@@ -1,272 +1,296 @@
-# Pipeline Walkthrough
+# Luồng Pipeline
 
-This document follows one session through the code, from upload to GeoJSON. It
-is centered on `runPipelineAsync()` in
-[`main.cpp`](../cpp-core/src/main.cpp).
+Tài liệu này đi theo một session từ lúc upload GeoTIFF đến lúc frontend nhận GeoJSON. Trọng tâm là `runPipelineAsync()` trong [`main.cpp`](../cpp-core/src/main.cpp).
 
-## End-to-end sequence
+---
+
+## 1. Sơ Đồ Tổng Thể
 
 ```mermaid
 sequenceDiagram
-    participant UI as Client
+    participant UI as Client frontend
     participant API as HttpGateway
-    participant P as Pipeline thread
+    participant P as Thread pipeline
     participant G as GDAL producer
-    participant W as Worker pool
+    participant W as Pool worker
     participant DB as PostGIS
 
     UI->>API: POST /upload
-    API->>DB: create session
-    API->>API: stream input.tif to disk
+    API->>DB: tạo session
+    API->>API: stream input.tif vào vùng lưu session
     UI->>API: POST /config
     UI->>API: POST /start
     API-->>UI: 202 Accepted
     API->>P: runPipelineAsync(ctx)
-    P->>G: open metadata and grid
-    loop each raster window
+    P->>G: mở metadata + grid
+    loop từng raster window
         G->>W: submit TileData
-        W->>W: infer and map geometry
+        W->>W: infer + map geometry
     end
-    P->>W: close queue and join
-    P->>P: global NMS
-    P->>DB: insert final polygons
+    P->>W: close queue + join
+    P->>P: NMS toàn cục
+    P->>DB: insert polygon cuối
     P->>DB: set DONE
     UI->>API: GET /results
-    API->>DB: GeoJSON and coverage query
+    API->>DB: GeoJSON + coverage query
     API-->>UI: FeatureCollection
 ```
 
-## Core data structures
+---
 
-All cross-module values are defined in
-[`common/types.hpp`](../cpp-core/src/common/types.hpp).
+## 2. Cấu Trúc Dữ Liệu Chính
+
+Các type xuyên module nằm trong [`common/types.hpp`](../cpp-core/src/common/types.hpp).
 
 ### `TileData`
 
-`TileData` is the unit of work passed through the queue:
+Đơn vị công việc đi qua queue:
 
-- grid position: `tile_row`, `tile_col`, `tile_index`;
-- source pixel offset: `pixel_x_offset`, `pixel_y_offset`;
-- actual edge-aware `width` and `height`;
+- `tile_row`, `tile_col`, `tile_index`;
+- `pixel_x_offset`, `pixel_y_offset`;
+- `width`, `height` thực tế, kể cả tile ở biên;
 - `band_count`;
-- interleaved HWC `std::vector<uint8_t> pixels`;
-- owning `session_id`.
-
-The expected pixel allocation is:
+- `std::vector<uint8_t> pixels` dạng HWC;
+- `session_id`.
 
 ```text
 tile bytes = width * height * band_count
 ```
 
-GDAL converts every source band to `GDT_Byte`, then the tiler changes
-band-sequential reads into HWC order.
-
 ### `Detection`
 
-An inference backend returns tile-local output:
+Kết quả AI trong hệ tọa độ pixel của tile:
 
-- axis-aligned `bbox`;
-- optional arbitrary pixel `polygon`;
+- `bbox`;
+- `polygon` dạng `PixelPoint`;
 - `class_id`;
 - `confidence`.
 
 ### `GeoDetection`
 
-After coordinate mapping, the result contains a WGS84 polygon, class,
-confidence, session ID, and source tile index. This is the value consumed by
-stitching and persistence.
+Kết quả sau `CoordinateMapper`:
 
-## Stage 1: upload and session allocation
+- polygon dạng `GeoPoint` WGS84;
+- class;
+- confidence;
+- session ID;
+- tile index.
 
-The upload route has two application callbacks:
+Đây là kiểu dữ liệu được đưa vào stitching và PostGIS.
 
-1. `UploadInitCallback` obtains a database-backed session ID.
-2. The content receiver writes bytes to
-   `/tmp/sessions/<session_id>/input.tif`.
-3. `UploadCompleteCallback` records the final path, name, and size in the
-   in-memory session context.
+---
 
-The HTTP response is returned only after the file receiver finishes. The
-pipeline does not start implicitly; configuration and start are separate API
-operations.
+## 3. Bước 1: Upload Và Tạo Session
 
-## Stage 2: configuration and validation
+Route `/upload` có hai callback:
 
-`PipelineConfig` controls:
+1. `UploadInitCallback` tạo session trong database và lấy session ID.
+2. Content reader stream byte vào `/tmp/sessions/{session_id}/input.tif`.
+3. `UploadCompleteCallback` ghi filepath, filename và size vào `SessionContext`.
+
+HTTP response chỉ trả sau khi stream file xong. Pipeline không tự start sau upload; config và start là hai bước riêng.
+
+---
+
+## 4. Bước 2: Kiểm Tra Config
+
+`PipelineConfig` gồm:
 
 ```text
 tile_size, overlap, model, model_path, max_workers, conf_thresh
 ```
 
-The gateway rejects:
+Gateway reject:
 
-- non-positive or greater-than-4096 tile sizes;
-- negative overlap or `overlap >= tile_size`;
-- worker counts outside `0..64`;
-- confidence outside `0..1`.
+- `tile_size <= 0` hoặc `tile_size > 4096`;
+- `overlap < 0` hoặc `overlap >= tile_size`;
+- `max_workers` ngoài `0..64`;
+- `conf_thresh` ngoài `0..1`.
 
-This validation is essential because tiling uses:
+Điều này quan trọng vì:
 
 ```text
 stride = tile_size - overlap
 ```
 
-A zero stride would make grid calculation invalid.
+Nếu stride bằng 0, grid tiling sẽ sai.
 
-## Stage 3: asynchronous start
+---
 
-The start callback changes the session to `LOADING`, stores the active session
-ID for telemetry, and launches a detached `std::thread`. The HTTP request returns
-`202 Accepted` while processing continues.
+## 5. Bước 3: Start Bất Đồng Bộ
 
-The outer `try/catch` in `runPipelineAsync()` prevents an uncaught pipeline
-exception from terminating the process. `markSessionError()` updates both the
-in-memory session and the database when possible.
+Start callback:
 
-## Stage 4: open the GeoTIFF
+- chuyển session sang `LOADING`;
+- lưu active session cho telemetry;
+- tạo detached `std::thread`;
+- HTTP trả `202 Accepted`.
 
-`TilingEngine::validateFile()` checks:
+`runPipelineAsync()` có outer `try/catch` để exception không làm terminate process. Khi lỗi, `markSessionError()` cập nhật cả in-memory session và database nếu có thể.
 
-1. file existence;
-2. `.tif` or `.tiff` extension;
-3. whether GDAL can open the file.
+---
 
-`open()` then reads:
+## 6. Bước 4: Mở GeoTIFF
 
-- raster width and height;
+`TilingEngine::validateFile()` kiểm tra:
+
+1. file tồn tại;
+2. đuôi `.tif` hoặc `.tiff`;
+3. GDAL mở được file.
+
+`open()` đọc:
+
+- width, height;
 - band count;
-- six-value affine geotransform;
-- source CRS WKT;
-- whether the CRS is geographic.
+- affine geotransform 6 giá trị;
+- CRS WKT;
+- CRS geographic hay projected.
 
-The tile grid uses:
+Grid:
 
 ```text
-stride = tile_size - overlap
+stride  = tile_size - overlap
 columns = ceil(image_width / stride)
 rows    = ceil(image_height / stride)
 ```
 
-At the right and bottom edges, `actual_w` and `actual_h` shrink to the remaining
-source pixels.
+Tile ở mép phải/dưới có `actual_w`, `actual_h` nhỏ hơn tile size cấu hình.
 
-## Stage 5: prepare coordinate mapping
+---
 
-`CoordinateMapper` receives immutable `ImageMetadata` and creates one GDAL/OGR
-coordinate transformation from the source CRS to EPSG:4326 when required.
+## 7. Bước 5: Chuẩn Bị CoordinateMapper
 
-The mapper also calculates the four-corner image footprint, which is stored in
-`SessionInfo` for the status API and later coverage calculation.
+`CoordinateMapper` nhận `ImageMetadata` immutable và tạo transform từ CRS nguồn sang EPSG:4326 nếu cần.
 
-## Stage 6: construct queue, workers, and AI sessions
+Mapper cũng tính footprint từ bốn góc ảnh. Footprint này dùng cho:
 
-The queue capacity is calculated as:
+- `/status`;
+- hiển thị viền ảnh nếu cần;
+- tính Land Cover Coverage.
+
+---
+
+## 8. Bước 6: Queue, Worker Và AI Session
+
+Queue capacity:
 
 ```text
 queue_capacity = effective_worker_count * 2
 ```
 
-`ThreadPool` starts `worker_count` threads. The model pool is constructed before
-worker execution:
+Trước khi producer bắt đầu đọc tile:
 
-- Mock, generic YOLO, and DOTA normally create one backend per worker.
-- SegFormer creates at most five ONNX sessions.
-- Workers map to an AI slot with `worker_id % ai_pool.size()`.
-- A per-slot mutex serializes workers that share the same backend.
+- `ThreadPool` tạo `worker_count` threads.
+- AI pool được tạo theo model.
+- Mock, YOLO, DOTA thường tạo một backend per worker.
+- SegFormer tạo tối đa 5 ONNX sessions.
+- Worker chọn AI slot bằng `worker_id % ai_pool.size()`.
 
-If a model is absent or fails to initialize, the current code logs the error and
-places a `MockAI` instance in that slot.
+Nếu model missing hoặc init lỗi, code log lỗi và fallback sang MockAI.
 
-## Stage 7: worker callback
+---
 
-`ThreadPool::start()` stores a lambda as `worker_fn_`. Every `workerLoop(id)`
-repeats:
+## 9. Bước 7: Callback Của Worker
+
+`ThreadPool::start()` lưu lambda vào `worker_fn_`. Mỗi worker chạy:
 
 ```text
-pop TileData -> worker_fn_(tile, id) -> destroy tile -> pop again
+pop TileData -> worker_fn_(tile, worker_id) -> destroy tile -> pop tiếp
 ```
 
-The injected callback performs:
+Callback của worker thực hiện:
 
-1. select and lock one AI instance;
-2. run `infer(tile)`;
-3. map pixel output to WGS84;
-4. append mapped values under `results_mutex`;
-5. atomically increment `tiles_done`;
-6. copy progress into `SessionInfo` under `ctx->mutex`;
-7. update PostGIS every 20 completed tiles.
+1. chọn và lock AI instance;
+2. `infer(tile)` trả `vector<Detection>`;
+3. `CoordinateMapper` map sang `vector<GeoDetection>`;
+4. push vào `all_geo_dets` dưới `results_mutex`;
+5. tăng `tiles_done`;
+6. cập nhật `SessionInfo`;
+7. update progress DB mỗi 20 tile.
 
-Any exception inside a worker records the first error, sets cancellation,
-closes the queue, and updates the session to `ERROR`.
+Nếu worker lỗi, pipeline set `ERROR`, request stop queue và không đi tiếp sang stitching/saving.
 
-## Stage 8: producer iteration
+---
 
-After workers are running, the pipeline thread calls
-`TilingEngine::iterateTiles()`.
+## 10. Bước 8: Producer Sinh Tile
 
-For every grid cell:
+Sau khi worker đã chạy, pipeline thread gọi `TilingEngine::iterateTiles()`.
 
-1. `readTile()` calls `RasterIO` for each band;
-2. a complete `TileData` is constructed;
-3. the callback checks cancellation;
-4. `pool->submit(std::move(tile))` transfers ownership to the queue.
+Mỗi grid cell:
 
-If the bounded queue is full, submit blocks. GDAL therefore stops reading more
-windows until inference frees queue capacity.
+1. `readTile()` gọi `RasterIO` từng band.
+2. Tạo `TileData`.
+3. Check cancel.
+4. `pool->submit(std::move(tile))`.
 
-## Stage 9: fan-in
+Nếu queue đầy, `submit()` block. Vì vậy GDAL tạm dừng đọc thêm ảnh cho đến khi worker xử lý bớt tile.
 
-Once iteration ends, `waitAll()`:
+---
 
-1. closes the queue;
-2. lets workers drain remaining items;
-3. joins every worker thread;
-4. clears worker handles;
-5. resets the queue.
+## 11. Bước 9: Fan-in
 
-This is the fan-in barrier. No stitching or saving starts before every worker has
-exited. After the barrier, the pipeline checks `worker_failed` and
-`cancel_requested` to prevent false `DONE` states.
+Khi producer đọc hết tile, `waitAll()`:
 
-## Stage 10: stitching
+1. close queue;
+2. để worker xử lý nốt item đã nhận;
+3. join toàn bộ worker;
+4. clear worker handles;
+5. reset queue.
 
-The state changes to `STITCHING`, and `Stitcher::runNMS()` receives the complete
-`all_geo_dets` vector. NMS runs on the pipeline thread and returns `final_dets`.
+Sau fan-in, pipeline kiểm tra `worker_failed` và `cancel_requested`. Nếu có lỗi/cancel, pipeline dừng và không báo `DONE`.
 
-The current stitcher is global and batch-oriented. See
-[Inference and Stitching](INFERENCE_AND_STITCHING.md) for the exact algorithm
-and its limitations.
+---
 
-## Stage 11: saving
+## 12. Bước 10: Stitching
 
-The state changes to `SAVING`. `PostGISClient::insertDetections()` opens one
-transaction, converts every polygon to WKT, inserts it with SRID 4326, and
-commits the transaction.
+Session chuyển sang `STITCHING`.
 
-If insertion fails, the pipeline becomes `ERROR`. Only a successful insert is
-followed by database and in-memory `DONE` state updates.
+`Stitcher::runNMS()` nhận toàn bộ `all_geo_dets`:
 
-## Stage 12: result retrieval
+- input là `vector<GeoDetection>`;
+- mỗi polygon tạo bbox tạm để tính IoU;
+- chỉ so sánh cùng class;
+- output là `final_dets`, vẫn giữ polygon WGS84.
 
-`GET /sessions/{id}/results` performs two database operations:
+---
 
-1. aggregate stored rows into a GeoJSON `FeatureCollection`;
-2. if a footprint is available, compute class coverage with PostGIS geography.
+## 13. Bước 11: Lưu Database
 
-The response keeps standard GeoJSON fields and adds a top-level `coverage`
-object for SegFormer visualization.
+Session chuyển sang `SAVING`.
 
-## State and error paths
+`PostGISClient::insertDetections()`:
+
+1. mở transaction;
+2. chuyển polygon WGS84 sang WKT;
+3. insert vào `detections.geom` với SRID 4326;
+4. commit transaction.
+
+Nếu insert fail, session chuyển `ERROR`. Chỉ khi insert thành công mới update `DONE`.
+
+---
+
+## 14. Bước 12: Lấy Kết Quả
+
+`GET /sessions/{id}/results`:
+
+1. Query polygon từ PostGIS và aggregate thành GeoJSON `FeatureCollection`.
+2. Nếu có footprint, tính `coverage` bằng PostGIS geography.
+
+Frontend dùng GeoJSON để vẽ polygon và dùng `coverage` để hiển thị tỷ lệ phủ lớp bề mặt.
+
+---
+
+## 15. State Và Error Path
 
 ```mermaid
 flowchart TB
     Run["runPipelineAsync"]
-    FileError["File/GDAL error"]
-    WorkerError["Worker exception"]
-    Cancel["Cancel request"]
-    DBError["Insert failure"]
-    Error["Set ERROR and stop"]
-    Done["Set DONE"]
+    FileError["Lỗi file/GDAL"]
+    WorkerError["Lỗi worker"]
+    Cancel["Yêu cầu cancel"]
+    DBError["Lỗi insert database"]
+    Error["Đặt ERROR + dừng"]
+    Done["Đặt DONE"]
 
     Run --> FileError --> Error
     Run --> WorkerError --> Error
@@ -275,23 +299,21 @@ flowchart TB
     Run --> Done
 ```
 
-Status/progress database update failures are logged because they should not
-crash active inference. Final detection insertion is mandatory and therefore
-fatal to the session.
+Progress/status DB update fail chỉ log warning. Final insert fail là lỗi bắt buộc vì kết quả không được lưu.
 
-## Memory lifetime
+---
+
+## 16. Memory Lifetime
 
 | Allocation | Lifetime |
 | --- | --- |
-| Uploaded GeoTIFF | Session volume until volume/session cleanup |
-| GDAL tile buffer | Producer read through one worker callback |
-| Queue tile buffers | While waiting, bounded by queue capacity |
-| ONNX tensors | One inference call, plus runtime allocator behavior |
-| AI sessions and weights | Complete pipeline run |
-| `all_geo_dets` | Complete processing and stitching stages |
-| `final_dets` | Stitching through database insertion |
-| GeoJSON response | One result request and browser render |
+| GeoTIFF upload | Trong `session_storage` cho đến khi xóa volume/session |
+| GDAL tile buffer | Từ lúc producer đọc đến khi worker callback xong |
+| Queue tile buffers | Khi tile đang chờ, bị giới hạn bởi queue capacity |
+| ONNX tensors | Trong một inference call, cộng runtime allocator behavior |
+| AI sessions/weights | Suốt một lần pipeline run |
+| `all_geo_dets` | Từ processing đến hết stitching |
+| `final_dets` | Từ stitching đến database insert |
+| GeoJSON response | Một request `/results` và browser render |
 
-The bounded queue solves unbounded pixel buffering. It does not bound detection
-accumulation or GeoJSON response size.
-
+Bounded queue giới hạn pixel buffer đang chờ. Nó không giới hạn số `GeoDetection` hoặc kích thước GeoJSON kết quả.

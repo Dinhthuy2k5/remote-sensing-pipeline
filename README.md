@@ -1,202 +1,173 @@
-# Remote Sensing Pipeline
+# Pipeline Xử Lý Ảnh Viễn Thám
 
-A containerized C++ pipeline for processing large geospatial rasters without
-loading the complete image into memory. The system streams GeoTIFF uploads to
-disk, reads overlapping windows with GDAL, runs tile-level AI inference in a
-bounded worker pool, maps pixel results to WGS84, removes duplicate detections,
-stores polygons in PostGIS, and renders the results in a React/MapLibre
-dashboard.
+Pipeline C++ để xử lý và phân tích ảnh viễn thám khổ lớn như GeoTIFF từ vệ tinh, UAV hoặc ảnh hàng không. Hệ thống không nạp toàn bộ ảnh vào RAM, mà stream file upload xuống vùng lưu session, đọc ảnh theo tile bằng GDAL, chạy AI inference trên nhiều worker, ánh xạ kết quả từ pixel sang WGS84, lưu polygon vào PostGIS và hiển thị kết quả trên dashboard React/MapLibre.
 
-The project currently supports mock inference, COCO object detection, DOTA
-oriented object detection, and LoveDA land-cover segmentation through ONNX
-Runtime.
+Các backend AI hiện có: MockAI, YOLOv8n-seg COCO, YOLO11n-OBB DOTA và SegFormer LoveDA.
 
-## Contents
+---
 
-- [Features](#features)
-- [Architecture](#architecture)
-- [Processing lifecycle](#processing-lifecycle)
-- [Technology stack](#technology-stack)
-- [Repository layout](#repository-layout)
-- [Documentation](#documentation)
-- [Quick start](#quick-start)
-- [Using the HTTP API](#using-the-http-api)
-- [Models](#models)
-- [Configuration](#configuration)
-- [Testing](#testing)
-- [Observed performance](#observed-performance)
+## Mục Lục
+
+- [Tính năng chính](#tính-năng-chính)
+- [Kiến trúc](#kiến-trúc)
+- [Luồng xử lý](#luồng-xử-lý)
+- [Công nghệ sử dụng](#công-nghệ-sử-dụng)
+- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
+- [Tài liệu chi tiết](#tài-liệu-chi-tiết)
+- [Chạy nhanh](#chạy-nhanh)
+- [HTTP API](#http-api)
+- [Model AI](#model-ai)
+- [Cấu hình pipeline](#cấu-hình-pipeline)
+- [Kiểm thử](#kiểm-thử)
+- [Kết quả đo hiệu năng](#kết-quả-đo-hiệu-năng)
 - [Land-cover coverage](#land-cover-coverage)
-- [Known limitations](#known-limitations)
+- [Hạn chế hiện tại](#hạn-chế-hiện-tại)
 
-## Features
+---
 
-- Streams uploaded GeoTIFF files directly to session storage.
-- Reads raster windows from disk with GDAL instead of loading the full raster.
-- Supports overlapping tile grids and edge tiles.
-- Uses a bounded, thread-safe queue to apply backpressure to the tile producer.
-- Runs multiple C++ worker threads and configurable ONNX Runtime sessions.
-- Converts tile-local pixel polygons to EPSG:4326 with GDAL reprojection.
-- Applies confidence-ordered, class-aware NMS after tile inference.
-- Stores geospatial polygons in PostGIS with GiST indexes.
-- Returns GeoJSON results and image-footprint-based land-cover coverage.
-- Broadcasts CPU, RAM, throughput, queue depth, state, and progress over UDP.
-- Relays UDP telemetry to browsers through a small Node.js WebSocket bridge.
-- Displays progress, telemetry, class statistics, polygons, and coverage with
-  React, MapLibre GL JS, and Recharts.
-- Converts worker, database, corrupt-file, and cancellation failures into an
-  `ERROR` session state instead of terminating the service.
+## Tính Năng Chính
 
-## Architecture
+- Upload GeoTIFF bằng HTTP và stream trực tiếp xuống disk, không giữ toàn bộ file trong RAM.
+- Lưu ảnh upload theo session tại Docker named volume `session_storage`, mount trong container ở `/tmp/sessions/{id}/input.tif`.
+- Đọc ảnh theo cửa sổ nhỏ bằng GDAL `RasterIO`.
+- Chia tile có overlap và xử lý được tile ở biên ảnh.
+- Dùng bounded queue để tạo backpressure, tránh tích lũy vô hạn tile trong RAM.
+- Chạy nhiều worker thread C++ và nhiều ONNX Runtime session.
+- Chuyển polygon từ tọa độ pixel của tile sang WGS84 EPSG:4326.
+- Stitching/NMS kết quả sau worker để giảm duplicate ở vùng overlap.
+- Lưu polygon vào PostGIS với GiST index.
+- Trả kết quả dạng GeoJSON và tính land-cover coverage theo footprint GeoTIFF.
+- Gửi telemetry CPU, RAM, FPS, queue size, state và progress qua UDP.
+- Dùng Node.js bridge để chuyển UDP telemetry sang WebSocket cho trình duyệt.
+- Frontend React + MapLibre hiển thị tiến độ, telemetry, polygon, thống kê class và coverage.
+- Chuyển lỗi file, worker, database hoặc cancel thành trạng thái `ERROR` thay vì làm crash service.
+
+---
+
+## Kiến Trúc
 
 ```mermaid
 flowchart TB
-    UI["Browser dashboard<br/>React + MapLibre"]
+    UI["Dashboard trên trình duyệt<br/>React + MapLibre"]
     Core["C++ core<br/>HTTP API + processing pipeline"]
-    DB[("PostGIS<br/>sessions + polygons")]
-    Files[("Session storage<br/>GeoTIFF files")]
-    Bridge["Telemetry bridge<br/>UDP to WebSocket"]
+    DB[("PostGIS<br/>sessions + detections")]
+    Files[("session_storage<br/>/tmp/sessions/{id}/input.tif")]
+    Bridge["Telemetry bridge<br/>UDP -> WebSocket"]
 
-    UI -->|"HTTP: upload, control, results"| Core
-    Core -->|"stream/read"| Files
-    Core -->|"SQL/WKT"| DB
+    UI -->|"HTTP: upload / config / start / results"| Core
+    Core -->|"stream upload + GDAL đọc window"| Files
+    Core -->|"SQL + WKT polygons"| DB
     Core -. "UDP metrics" .-> Bridge
-    Bridge -. "WebSocket" .-> UI
+    Bridge -. "WebSocket metrics" .-> UI
 ```
 
-Inside the C++ core, one pipeline thread produces tiles while a worker pool
-consumes them:
+Trong `cpp-core`, pipeline dùng mô hình producer-consumer:
 
 ```mermaid
 flowchart TB
-    Upload["Uploaded GeoTIFF on disk"]
-    Tiler["GDAL windowed tiling"]
+    Upload["GeoTIFF trong vùng lưu session"]
+    Tiler["TilingEngine<br/>GDAL RasterIO"]
     Queue["Bounded TileQueue<br/>capacity = workers x 2"]
-    Workers["ThreadPool workers"]
+    Workers["Các worker trong ThreadPool"]
     Infer["MockAI / ONNX inference"]
-    Map["Pixel polygons to WGS84"]
-    NMS["Global class-aware NMS"]
-    Save["PostGIS persistence"]
+    Map["CoordinateMapper<br/>Pixel -> WGS84"]
+    NMS["Stitcher<br/>class-aware NMS"]
+    Save["PostGISClient<br/>insert bằng transaction"]
 
     Upload --> Tiler --> Queue --> Workers
     Workers --> Infer --> Map --> NMS --> Save
 ```
 
-### Producer-consumer flow
+### Điểm quan trọng
 
-`TilingEngine::iterateTiles()` runs on the pipeline thread and is the producer.
-Each tile contains an interleaved HWC byte buffer plus its source-image offset.
-`ThreadPool` workers block on `TileQueue::pop()`, perform inference, and append
-mapped results to a protected result vector.
+- Thread pipeline là producer, không có thread tiling riêng.
+- Worker lấy `TileData` từ bounded queue.
+- Queue đầy thì producer bị block, nhờ đó RAM không tăng theo tổng số tile.
+- `Detection` là kết quả AI trong pixel-space của tile.
+- `GeoDetection` là kết quả sau khi `CoordinateMapper` chuyển polygon sang WGS84.
+- `Stitcher` nhận `GeoDetection`, dùng bbox tạm để tính IoU, nhưng output vẫn giữ polygon WGS84.
 
-The queue capacity is `worker_count * 2`. When it is full, `push()` blocks the
-tiling producer until a worker removes a tile. This backpressure bounds queued
-pixel memory independently of source raster size.
+---
 
-## Processing lifecycle
+## Luồng Xử Lý
 
-The standalone `StateMachine` module defines the intended lifecycle below. See
-[Known limitations](#runtime-and-operations) for its current integration status.
+1. `POST /upload` tạo session và stream file vào `/tmp/sessions/{id}/input.tif`.
+2. Client frontend gửi cấu hình tile size, overlap, worker, model và confidence.
+3. GDAL mở file, đọc metadata, geotransform và CRS.
+4. TilingEngine đọc từng tile từ disk và submit vào bounded queue.
+5. Worker chạy AI inference trên `TileData`.
+6. AI trả `vector<Detection>` với bbox/polygon theo pixel của tile.
+7. `CoordinateMapper` chuyển sang `vector<GeoDetection>` WGS84.
+8. Sau `waitAll()`, `Stitcher` chạy class-aware NMS.
+9. `PostGISClient` chuyển polygon sang WKT và insert vào bảng `detections`.
+10. `/results` trả GeoJSON và coverage cho frontend.
 
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-    IDLE --> LOADING: upload/start
-    LOADING --> TILING
-    TILING --> PROCESSING
-    PROCESSING --> STITCHING: workers joined
-    STITCHING --> SAVING: NMS complete
-    SAVING --> DONE: database commit
-    LOADING --> ERROR
-    TILING --> ERROR
-    PROCESSING --> ERROR
-    STITCHING --> ERROR
-    SAVING --> ERROR
-    ERROR --> RECOVERING
-    RECOVERING --> IDLE
-    DONE --> IDLE
-```
+---
 
-At runtime, a session follows this practical flow:
+## Công Nghệ Sử Dụng
 
-1. `POST /upload` allocates a session and streams the request body to
-   `/tmp/sessions/<id>/input.tif`.
-2. The client validates and stores tile, overlap, worker, model, and confidence
-   settings.
-3. GDAL validates the file, reads metadata, builds the tile grid, and prepares
-   the source-CRS-to-WGS84 transform.
-4. The producer reads one raster window at a time and submits it to the bounded
-   queue.
-5. Workers run inference, vectorize outputs, and map tile pixels to WGS84.
-6. The pipeline joins every worker, then runs class-aware NMS on one thread.
-7. Final polygons are inserted into PostGIS in one transaction.
-8. `/results` returns GeoJSON and calculates land-cover coverage against the
-   GeoTIFF footprint.
-
-## Technology stack
-
-| Layer | Technology |
+| Lớp | Công nghệ |
 | --- | --- |
-| Core | C++17, CMake, STL threads/atomics/condition variables |
+| Core backend | C++17, CMake, STL threads, atomics, condition variables |
 | Raster I/O | GDAL 3.6.3 |
-| Inference | ONNX Runtime 1.16.3, CPU execution provider |
-| HTTP | cpp-httplib |
-| Spatial database | PostgreSQL 15, PostGIS 3.3, libpqxx |
-| Frontend | React 19, Vite 8, MapLibre GL JS, Recharts |
+| Suy luận AI | ONNX Runtime 1.16.3, CPU Execution Provider |
+| HTTP API | cpp-httplib |
+| Cơ sở dữ liệu | PostgreSQL 15, PostGIS 3.3, libpqxx |
+| Giao diện web | React, Vite, MapLibre GL JS, Recharts |
 | Telemetry bridge | Node.js, UDP, WebSocket (`ws`) |
-| Deployment | Docker, Docker Compose |
+| Deploy | Docker, Docker Compose |
 
-## Repository layout
+---
+
+## Cấu Trúc Thư Mục
 
 ```text
 .
 |-- cpp-core/
-|   |-- models/                 # Local ONNX files; large files are ignored
+|   |-- models/                 # Model ONNX cục bộ, không commit file lớn
 |   |-- src/
-|   |   |-- api/                # HTTP gateway and routes
-|   |   |-- common/             # Shared types and logging
-|   |   |-- database/           # PostGIS client and GeoJSON/coverage queries
-|   |   |-- inference/          # Mock, YOLO, OBB, and SegFormer backends
-|   |   |-- monitoring/         # UDP system and pipeline metrics
-|   |   |-- pipeline/           # Tiling, queue, thread pool, mapping, states
+|   |   |-- api/                # HTTP gateway và routes
+|   |   |-- common/             # Types, logging
+|   |   |-- database/           # PostGIS client, GeoJSON, coverage query
+|   |   |-- inference/          # MockAI, YOLO, OBB, SegFormer
+|   |   |-- monitoring/         # UDP telemetry
+|   |   |-- pipeline/           # Tiling, queue, thread pool, mapping, state
 |   |   `-- stitching/          # Global NMS
-|   `-- tests/                  # C++ state-machine tests
-|-- database/init.sql           # PostGIS schema and indexes
+|   `-- tests/                  # Test StateMachine
+|-- database/init.sql           # Schema PostGIS
+|-- docs/                       # Tài liệu kỹ thuật chi tiết
 |-- frontend/
-|   |-- bridge.cjs              # UDP :9090 to WebSocket :9091
+|   |-- bridge.cjs              # UDP :9090 -> WebSocket :9091
 |   `-- src/                    # React dashboard
-|-- tools/stress_test.py        # Three-run API stress test
-|-- data/samples/               # Local GeoTIFF samples; ignored by Git
+|-- report/                     # Báo cáo LaTeX
+|-- tools/stress_test.py        # Stress test 3 phiên liên tiếp
+|-- data/samples/               # GeoTIFF mẫu cục bộ, không commit
 `-- docker-compose.yml
 ```
 
-## Documentation
+---
 
-The README is the operational overview. These documents explain the source code
-and algorithms in more depth:
+## Tài Liệu Chi Tiết
 
-- [System architecture](docs/ARCHITECTURE.md): components, data/control planes,
-  deployment boundaries, session ownership, and source-code map.
-- [Pipeline walkthrough](docs/PIPELINE.md): `runPipelineAsync()` from upload to
-  `DONE`, including data structures, error paths, and memory lifetime.
-- [Concurrency model](docs/CONCURRENCY.md): producer-consumer execution,
-  bounded-queue backpressure, workers, atomics, mutexes, cancellation, and
-  tuning.
-- [Inference and stitching](docs/INFERENCE_AND_STITCHING.md): model backends,
-  preprocessing/post-processing, coordinate mapping, NMS, PostGIS coverage,
-  and algorithmic limitations.
+- [Kiến trúc hệ thống](docs/ARCHITECTURE.md): service, volume, data flow, source map.
+- [Luồng pipeline](docs/PIPELINE.md): từ upload đến `DONE`, bao gồm memory lifetime và error path.
+- [Đa luồng và backpressure](docs/CONCURRENCY.md): ThreadPool, bounded queue, mutex, atomic, cancel.
+- [Inference, stitching và coverage](docs/INFERENCE_AND_STITCHING.md): AI backend, coordinate mapping, NMS, PostGIS coverage.
 
-## Quick start
+---
 
-### Prerequisites
+## Chạy Nhanh
 
-- Docker Desktop with Docker Compose.
-- Node.js 20 or newer and npm for the telemetry bridge and development UI.
-- At least 8 GB RAM for multi-session SegFormer CPU inference.
-- One or more ONNX model files listed in [Models](#models).
+### 1. Yêu cầu
 
-### 1. Configure the environment
+- Docker Desktop và Docker Compose.
+- Node.js 20+ và npm.
+- RAM tối thiểu 8 GB nếu chạy SegFormer trên CPU.
+- Model ONNX đặt trong `cpp-core/models/`.
 
-Create a root `.env` file. The defaults below match `docker-compose.yml`:
+### 2. Cấu hình `.env`
+
+Tạo file `.env` ở thư mục gốc:
 
 ```dotenv
 POSTGRES_DB=remote_sensing
@@ -210,11 +181,7 @@ UDP_PORT=9090
 UDP_BROADCAST_INTERVAL_MS=500
 ```
 
-Do not commit real credentials. The root `.env` file is ignored by Git.
-
-### 2. Add models
-
-Place model artifacts under `cpp-core/models/`:
+### 3. Đặt model
 
 ```text
 cpp-core/models/yolov8n-seg.onnx
@@ -223,24 +190,23 @@ cpp-core/models/segformer-loveda-b2.onnx
 cpp-core/models/segformer-loveda-b2.onnx.data
 ```
 
-Model weights are intentionally excluded from Git. SegFormer uses ONNX external
-data, so its `.onnx` and `.onnx.data` files must stay together.
+SegFormer dùng ONNX external data, vì vậy file `.onnx` và `.onnx.data` phải đi cùng nhau.
 
-### 3. Start PostGIS and the C++ service
+### 4. Start backend
 
 ```powershell
 docker compose up --build postgis cpp-core
 ```
 
-Check the API from another terminal:
+Kiểm tra API:
 
 ```powershell
 Invoke-RestMethod http://localhost:8080/health
 ```
 
-### 4. Start the telemetry bridge
+### 5. Start telemetry bridge
 
-The browser cannot receive UDP directly. Run the bridge on the host:
+Trình duyệt không nhận UDP trực tiếp, nên bridge phải chạy trên host:
 
 ```powershell
 cd frontend
@@ -248,46 +214,32 @@ npm install
 npm run bridge
 ```
 
-The bridge listens for UDP on `9090` and exposes WebSocket telemetry at
-`ws://localhost:9091`.
+Bridge nhận UDP ở `9090` và mở WebSocket tại `ws://localhost:9091`.
 
-### 5. Start the frontend
-
-In a third terminal:
+### 6. Start frontend dev
 
 ```powershell
 cd frontend
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173), select a model and
-configuration, then choose a GeoTIFF. The UI uploads, configures, starts, polls,
-and renders the session automatically.
+Mở [http://localhost:5173](http://localhost:5173), chọn model, cấu hình, rồi upload GeoTIFF.
 
-The static frontend can also be built and served on port `3000`:
+---
 
-```powershell
-docker compose up --build frontend
-```
+## HTTP API
 
-The current frontend container does not run `bridge.cjs`; the host bridge is
-still required for live telemetry.
-
-## Using the HTTP API
-
-### Endpoints
-
-| Method | Endpoint | Purpose |
+| Phương thức | Endpoint | Chức năng |
 | --- | --- | --- |
-| `GET` | `/health` | Service health |
-| `POST` | `/upload` | Stream a raw GeoTIFF body to session storage |
-| `POST` | `/sessions/{id}/config` | Set tile and inference configuration |
-| `POST` | `/sessions/{id}/start` | Start the asynchronous pipeline |
-| `POST` | `/sessions/{id}/cancel` | Stop queue production and cancel workers |
-| `GET` | `/sessions/{id}/status` | Read state, progress, errors, and footprint |
-| `GET` | `/sessions/{id}/results` | Read GeoJSON detections and coverage |
+| `GET` | `/health` | Kiểm tra service |
+| `POST` | `/upload` | Stream GeoTIFF vào vùng lưu session |
+| `POST` | `/sessions/{id}/config` | Cấu hình pipeline |
+| `POST` | `/sessions/{id}/start` | Bắt đầu xử lý bất đồng bộ |
+| `POST` | `/sessions/{id}/cancel` | Hủy session đang chạy |
+| `GET` | `/sessions/{id}/status` | Lấy state, progress, lỗi và footprint |
+| `GET` | `/sessions/{id}/results` | Lấy GeoJSON và coverage |
 
-### PowerShell example
+### Ví dụ PowerShell
 
 ```powershell
 $path = "C:\data\image.tif"
@@ -320,69 +272,67 @@ Invoke-RestMethod `
 Invoke-RestMethod `
   -Uri "http://localhost:8080/sessions/$sid/start" `
   -Method POST
-
-Invoke-RestMethod "http://localhost:8080/sessions/$sid/status"
-Invoke-RestMethod "http://localhost:8080/sessions/$sid/results"
 ```
 
-For very large files, prefer `curl --data-binary` or the frontend upload flow;
-the PowerShell example above reads the complete file into client memory.
+Lưu ý: ví dụ trên đọc toàn bộ file vào RAM phía client PowerShell. Với file rất lớn, nên dùng frontend hoặc `curl --data-binary`.
 
-## Models
+---
 
-| Config key | Expected artifact | Intended use |
+## Model AI
+
+| `model` | Artifact | Mục đích |
 | --- | --- | --- |
-| `mock` | None | Pipeline, API, concurrency, and stress testing |
-| `onnx` | `yolov8n-seg.onnx` | COCO object-detection demo; not remote-sensing-specific |
-| `dota_obb` | `yolo11n-obb.onnx` | Oriented objects in high-resolution aerial imagery |
-| `segformer_loveda` | `segformer-loveda-b2.onnx` plus external data | LoveDA-style land-cover segmentation |
+| `mock` | Không cần model | Kiểm thử pipeline, API, queue, database |
+| `onnx` | `yolov8n-seg.onnx` | Demo tích hợp ONNX COCO, không chuyên cho viễn thám |
+| `dota_obb` | `yolo11n-obb.onnx` | Object detection ảnh hàng không độ phân giải cao |
+| `segformer_loveda` | `segformer-loveda-b2.onnx` + `.onnx.data` | Land-cover segmentation |
 
-LoveDA output classes are `Ignore`, `Background`, `Building`, `Road`, `Water`,
-`Barren`, `Forest`, and `Agricultural`. `Ignore` and `Background` are not emitted
-as map polygons.
+Class của SegFormer LoveDA:
 
-If an ONNX model is missing or initialization fails, the current implementation
-logs the failure and falls back to MockAI. Always inspect the core logs before
-interpreting a result as real inference.
+```text
+Ignore, Background, Building, Road, Water, Barren, Forest, Agricultural
+```
 
-## Configuration
+`Ignore` và `Background` không được vẽ thành polygon trên bản đồ.
 
-| Field | Valid range | Notes |
+---
+
+## Cấu Hình Pipeline
+
+| Trường | Giá trị hợp lệ | Ghi chú |
 | --- | --- | --- |
-| `tile_size` | `1..4096` | Source window size in pixels |
-| `overlap` | `0..tile_size-1` | Tile overlap in pixels |
-| `max_workers` | `0..64` | `0` selects approximately hardware threads minus one |
-| `conf_thresh` | `0.0..1.0` | Minimum model confidence |
-| `model` | See model table | Selects the inference/post-processing backend |
-| `model_path` | Container path | Path to the ONNX graph inside `cpp-core` |
+| `tile_size` | `1..4096` | Kích thước cửa sổ đọc ảnh |
+| `overlap` | `0..tile_size-1` | Vùng chồng lấp giữa tile |
+| `max_workers` | `0..64` | `0` chọn gần bằng số hardware threads |
+| `conf_thresh` | `0.0..1.0` | Ngưỡng confidence |
+| `model` | Xem bảng model | Chọn backend AI |
+| `model_path` | Đường dẫn trong container | Ví dụ `/app/models/...onnx` |
 
-Practical starting points:
+Gợi ý thực nghiệm:
 
-- SegFormer: `tile_size=1024`, `overlap=128`, `max_workers=2..4`,
-  `conf_thresh=0.45..0.60`.
-- DOTA OBB: match the model input with `tile_size=1024`; use overlap for small
-  objects near tile boundaries.
-- Mock stress test: `tile_size=512`, `overlap=64`.
+- SegFormer: `tile_size=1024`, `overlap=128`, `max_workers=2..4`, `conf_thresh=0.45..0.60`.
+- DOTA OBB: `tile_size=1024`, overlap đủ lớn để giữ vật thể ở biên tile.
+- MockAI stress test: `tile_size=512`, `overlap=64`.
 
-SegFormer currently caps ONNX instances at five. Extra workers share these
-instances through per-instance mutexes.
+---
 
-## Testing
+## Kiểm Thử
 
-### Build checks
+### Build backend
 
 ```powershell
 docker compose build cpp-core
+```
 
+### Build frontend
+
+```powershell
 cd frontend
 npm install
 npm run build
 ```
 
-### State-machine unit test
-
-The runtime image does not include test binaries. Build and run the builder
-stage explicitly:
+### Test StateMachine
 
 ```powershell
 docker build --target builder -t rs-pipeline-builder cpp-core
@@ -391,18 +341,12 @@ docker run --rm rs-pipeline-builder /app/build/test_state_machine
 
 ### Stress test
 
-Install the Python client dependency, set `FILE_PATH` in
-`tools/stress_test.py`, start PostGIS and `cpp-core`, then run:
-
 ```powershell
 python -m pip install requests
 python tools/stress_test.py
 ```
 
-The script executes three sequential sessions and checks that all sessions
-reach `DONE` with consistent result counts.
-
-To monitor container memory on Windows:
+Monitor RAM container:
 
 ```powershell
 while ($true) {
@@ -411,115 +355,71 @@ while ($true) {
 }
 ```
 
-## Observed performance
+---
 
-These are development measurements, not portable guarantees. Times depend on
-compression, spatial content, confidence threshold, tile settings, CPU, Docker
-memory limits, and result count.
+## Kết Quả Đo Hiệu Năng
 
-Test machine: Intel Core i5-1135G7, CPU-only ONNX Runtime, approximately 7.8 GB
-available to Docker.
+Các số liệu dưới đây là kết quả trên máy phát triển, không phải cam kết hiệu năng cố định.
 
-| Workload | Configuration | Observed result |
+| Bài kiểm thử | Cấu hình | Kết quả quan sát |
 | --- | --- | --- |
-| Large synthetic raster with MockAI | 23,000 x 23,000, 2,704 tiles, 3 runs | 6.1-7.2 s pipeline time; approximately 462 MiB peak; 8,093 consistent detections |
-| Approximately 467 MiB NAIP raster with SegFormer | 1,024 tile, 128 overlap, 2 workers/sessions, 168 tiles | Approximately 6 min; approximately 2.8 GB peak; approximately 25% CPU |
-| Same NAIP raster with SegFormer | 1,024 tile, 128 overlap, 4 workers/sessions, 168 tiles | Approximately 4 min 40 s; approximately 3.0 GB peak; approximately 50% CPU |
+| GeoTIFF synthetic + MockAI | 23,000 x 23,000, 2,704 tile, 3 lần chạy | 6.1-7.2 s pipeline; khoảng 462 MiB RAM; 8,093 detections ổn định |
+| NAIP khoảng 467 MiB + SegFormer | tile 1024, overlap 128, 2 workers/sessions | khoảng 6 phút; khoảng 2.8 GB RAM; CPU khoảng 25% |
+| NAIP khoảng 467 MiB + SegFormer | tile 1024, overlap 128, 4 workers/sessions | khoảng 4 phút 40 giây; khoảng 3.0 GB RAM; CPU khoảng 50% |
 
-The MockAI row measures tiling, queueing, mapping, stitching, and database flow;
-it does not represent neural-network throughput. Increasing SegFormer sessions
-from two to four improved the observed runtime by more than 20%, with a much
-smaller memory increase than a linear per-session estimate.
+MockAI đo luồng tiling, queue, mapping, stitching và database; không đại diện cho tốc độ AI thật.
 
-## Land-cover coverage
+---
 
-For SegFormer sessions, `/results` includes a top-level `coverage` object. The
-backend computes coverage in PostGIS rather than approximating area in browser
-longitude/latitude coordinates.
+## Land-cover Coverage
 
-For each class:
+Với SegFormer, `/results` trả thêm object `coverage`. Backend tính coverage bằng PostGIS, không tính diện tích trong browser.
 
 ```text
-coverage = disjoint class area / GeoTIFF footprint area * 100
+coverage = diện tích class không chồng lặp / diện tích footprint GeoTIFF * 100
 ```
 
-The query:
+Quy trình SQL:
 
-1. Clips detections to the image footprint.
-2. Uses `ST_UnaryUnion(ST_Collect(...))` to remove same-class overlap.
-3. Assigns cross-class overlap to the class with higher maximum confidence.
-4. Uses `ST_Area(...::geography)` to calculate square metres.
-5. Reports `Unclassified = 100 - sum(class coverage)`.
+1. Cắt polygon theo footprint ảnh.
+2. Hợp nhất polygon cùng class để tránh đếm lặp.
+3. Xử lý overlap giữa các class theo confidence.
+4. Tính diện tích bằng `ST_Area(...::geography)`.
+5. Tính `Unclassified = 100 - tổng coverage các class`.
 
-`Unclassified` includes model `Ignore`/`Background` output, pixels below the
-confidence threshold, small regions removed by post-processing, and image areas
-for which no polygon was emitted. It is not, by itself, a model-accuracy metric.
+`Unclassified` gồm Background, Ignore, pixel dưới confidence, vùng nhỏ bị lọc và vùng không sinh polygon. Nó không phải trực tiếp là tỷ lệ sai của model.
 
-## Known limitations
+---
 
-### Inference and data
+## Hạn Chế Hiện Tại
 
-- ONNX Runtime is currently configured for CPU inference only. CUDA, TensorRT,
-  DirectML, and OpenVINO execution providers are not enabled.
-- The runtime package and Docker image target Linux x86-64. ARM deployment is a
-  design goal, not a tested build target yet.
-- Current ONNX preprocessors produce three-channel input. Extra multispectral
-  bands are read by GDAL but are not consumed by the provided models.
-- The generic YOLO backend decodes bounding boxes from `yolov8n-seg.onnx` but
-  does not decode its prototype masks, despite the source model being a
-  segmentation variant.
-- Raster samples and model weights are not versioned because of their size.
-- Missing or incompatible models silently become MockAI after an error log;
-  this is convenient for pipeline testing but risky for unattended inference.
+### AI và dữ liệu
 
-### Segmentation and stitching
+- ONNX Runtime hiện chạy CPU, chưa bật CUDA, TensorRT, DirectML hoặc OpenVINO.
+- Docker image hiện target Linux x86-64; ARM/Jetson chưa được kiểm thử.
+- Backend hiện tạo input 3 channel, chưa khai thác đầy đủ ảnh multispectral nhiều band.
+- YOLOv8n-seg COCO chỉ dùng như demo ONNX, không phù hợp để đánh giá chính xác ảnh viễn thám.
+- Nếu model ONNX lỗi hoặc thiếu, pipeline có thể fallback sang MockAI sau khi log lỗi.
 
-- Semantic tiles are vectorized locally. The pipeline does not blend logits or
-  probability masks across overlap before vectorization, so tile seams and
-  cross-class conflicts can remain.
-- NMS uses axis-aligned bounding boxes in longitude/latitude degrees, compares
-  only detections of the same class, and removes a lower-confidence detection
-  only when IoU is greater than `0.5`.
-- Stitching runs after all workers finish and is currently single-threaded.
-- Coverage resolves remaining cross-class overlap for reporting, but it does
-  not rewrite the stored detection polygons.
+### Stitching và coverage
 
-### Memory and throughput
+- SegFormer polygonize từng tile trước, chưa stitch mask/logit toàn cục.
+- NMS dùng bbox tạm theo lon/lat degree, không phải polygon IoU trong CRS metric.
+- NMS chỉ so sánh cùng class.
+- Coverage resolve overlap để báo cáo thống kê, nhưng không sửa lại polygon đã lưu.
 
-- The bounded tile queue controls queued pixel memory, but all mapped
-  `GeoDetection` objects remain in memory until inference completes.
-- Final detections are inserted in one transaction. Very large result sets can
-  increase memory, save latency, and transaction size.
-- `/results` returns all features as one GeoJSON document. Tens of thousands of
-  polygons increase database query time, response size, browser memory, and
-  MapLibre rendering cost.
-- Coverage union/difference operations are exact spatial operations and can be
-  expensive for highly fragmented result sets.
-- PostGIS access uses one connection protected by a mutex rather than a
-  connection pool.
+### Vận hành
 
-### Runtime and operations
+- `StateMachine` đã có module và test, nhưng runtime vẫn cập nhật một số state trực tiếp trong `main.cpp`.
+- Thread pipeline đang detached, chưa có graceful shutdown đầy đủ.
+- PostGIS dùng một connection được bảo vệ bằng mutex, chưa có connection pool.
+- `/results` trả toàn bộ GeoJSON một lần, có thể nặng khi polygon rất nhiều.
+- API chưa có authentication, TLS, upload quota hoặc phân quyền người dùng.
 
-- The `StateMachine` module and tests define legal transitions, but the main
-  pipeline currently updates `SessionInfo::status` directly instead of routing
-  every transition through `StateMachine`.
-- The pipeline thread is detached. Graceful process shutdown and recovery of
-  interrupted sessions are not implemented.
-- Telemetry tracks one active session ID and is not designed for reliable
-  multi-session observability.
-- The UDP destination, WebSocket URL, and frontend API URL contain localhost or
-  `host.docker.internal` assumptions and need configuration for remote hosts.
-- The frontend Docker service serves static assets only; the WebSocket bridge
-  is a separate host process.
-- The API has no authentication, authorization, TLS, upload quota, resumable
-  upload, or per-user session isolation. It is suitable for local development
-  and controlled demonstrations, not direct public exposure.
+---
 
-## Current scope
+## Phạm Vi Hiện Tại
 
-The project demonstrates an end-to-end, resource-aware remote-sensing backend:
-disk-windowed raster access, bounded producer-consumer concurrency, swappable AI
-backends, geospatial coordinate mapping, PostGIS persistence, failure handling,
-real-time telemetry, and browser visualization. The next engineering work should
-focus on probability-mask stitching, true multispectral models, GPU execution,
-streaming result persistence, and production-grade session orchestration.
+Project hiện là prototype end-to-end cho bài toán xử lý ảnh viễn thám khổ lớn: đọc ảnh theo tile, xử lý đa luồng có backpressure, tích hợp AI backend thay thế được, chuyển tọa độ sang WGS84, lưu PostGIS, telemetry thời gian thực và trực quan hóa trên bản đồ.
+
+Các hướng phát triển tiếp theo: mask-level stitching, model multispectral, GPU inference, streaming insert vào PostGIS và session scheduler cho môi trường production.

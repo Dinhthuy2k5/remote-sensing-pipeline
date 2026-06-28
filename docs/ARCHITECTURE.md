@@ -1,99 +1,96 @@
-# System Architecture
+# Kiến Trúc Hệ Thống
 
-This document explains the runtime boundaries, data flow, ownership model, and
-source layout of the remote-sensing pipeline. For the exact execution path
-inside one session, continue with [Pipeline Walkthrough](PIPELINE.md).
+Tài liệu này mô tả ranh giới runtime, luồng dữ liệu, quyền sở hữu dữ liệu và cách đọc source code của remote-sensing pipeline. Nếu muốn xem chi tiết từng bước trong một session, đọc tiếp [Luồng Pipeline](PIPELINE.md).
 
-## Design goals
+---
 
-The architecture follows the original project requirements:
+## 1. Mục Tiêu Thiết Kế
 
-1. Process GeoTIFF files that are too large to load into memory as one image.
-2. Use CPU resources concurrently without unbounded queues or data races.
-3. Keep reliable HTTP control separate from lossy, low-latency telemetry.
-4. Preserve geospatial metadata from source pixels to PostGIS polygons.
-5. Isolate file, worker, and database failures to one session.
-6. Keep inference replaceable so pipeline code does not depend on one model.
+Kiến trúc được xây dựng theo các yêu cầu chính của đề tài:
 
-The implementation is a modular single-core service rather than a distributed
-cluster. Docker Compose supplies deployment isolation and service discovery,
-while C++ threads provide parallelism inside the core process.
+1. Xử lý GeoTIFF lớn mà không nạp toàn bộ ảnh vào RAM.
+2. Khai thác CPU đa luồng nhưng tránh unbounded queue và data race.
+3. Tách HTTP control đáng tin cậy khỏi telemetry UDP độ trễ thấp.
+4. Bảo toàn thông tin không gian từ pixel đến polygon PostGIS.
+5. Cô lập lỗi file, worker và database trong từng session.
+6. Cho phép thay backend AI mà không sửa pipeline chính.
 
-## System context
+Hệ thống hiện là một core service module hóa, chạy trong Docker Compose. Cơ chế xử lý song song nằm bên trong process C++ thông qua `ThreadPool`.
+
+---
+
+## 2. Bối Cảnh Hệ Thống
 
 ```mermaid
 flowchart TB
-    User["User"]
+    User["Người dùng"]
     UI["React dashboard<br/>MapLibre + Recharts"]
     Core["C++ core service"]
     DB[("PostGIS")]
-    Files[("Session volume")]
+    Files[("volume session_storage")]
     Bridge["Node.js telemetry bridge"]
 
     User --> UI
     UI -->|"HTTP"| Core
-    Core -->|"GeoTIFF stream"| Files
-    Core -->|"sessions and polygons"| DB
+    Core -->|"stream GeoTIFF + GDAL đọc window"| Files
+    Core -->|"sessions + polygons"| DB
     Core -. "UDP :9090" .-> Bridge
     Bridge -. "WebSocket :9091" .-> UI
 ```
 
-### Runtime components
+### Thành phần runtime
 
-| Component | Responsibility | Important files |
+| Thành phần | Trách nhiệm | File chính |
 | --- | --- | --- |
-| Browser dashboard | Upload, configuration, polling, metrics, map rendering | `frontend/src/App.jsx`, `components/`, `api/backend.js` |
-| Telemetry bridge | Receive host UDP and fan out messages to browsers | `frontend/bridge.cjs` |
-| HTTP gateway | Stream uploads and expose session routes | `cpp-core/src/api/http_gateway.*` |
-| Session manager | Own per-session mutable context | `cpp-core/src/main.cpp` |
-| Processing pipeline | Coordinate tiling, workers, inference, stitching, saving | `cpp-core/src/main.cpp::runPipelineAsync` |
-| Spatial database | Persist session state and WGS84 polygons | `database/init.sql`, `database/postgis_client.*` |
-| Telemetry broadcaster | Sample process/system state and send UDP JSON | `monitoring/udp_broadcaster.*` |
+| Dashboard trình duyệt | Upload, cấu hình, polling, metrics, vẽ bản đồ | `frontend/src/App.jsx`, `components/`, `api/backend.js` |
+| Telemetry bridge | Nhận UDP trên host và gửi WebSocket cho browser | `frontend/bridge.cjs` |
+| HTTP gateway | Stream upload và expose session API | `cpp-core/src/api/http_gateway.*` |
+| Session manager | Quản lý context mutable theo session | `cpp-core/src/main.cpp` |
+| Processing pipeline | Điều phối tiling, worker, inference, stitching, saving | `runPipelineAsync()` trong `main.cpp` |
+| Spatial database | Lưu session state và polygon WGS84 | `database/init.sql`, `postgis_client.*` |
+| UDP broadcaster | Lấy metric và gửi JSON telemetry | `monitoring/udp_broadcaster.*` |
 
-## Two communication planes
+---
 
-The system deliberately uses two communication paths.
+## 3. Hai Kênh Giao Tiếp
 
-### Control and data plane: HTTP/TCP
+### 3.1 Control/data plane: HTTP/TCP
 
-HTTP carries operations that must be reliable:
+HTTP dùng cho dữ liệu cần tin cậy:
 
-- raw GeoTIFF upload;
-- session configuration;
-- start and cancel commands;
+- upload GeoTIFF;
+- cấu hình session;
+- start/cancel;
 - status polling;
-- GeoJSON result retrieval.
+- lấy kết quả GeoJSON.
 
-The upload handler writes chunks to disk as cpp-httplib receives them. The
-server therefore does not first materialize the complete request body in an
-application buffer. TCP supplies ordering and retransmission.
+Handler `/upload` ghi từng chunk xuống disk khi cpp-httplib nhận dữ liệu, không tạo buffer chứa toàn bộ request body trong RAM ứng dụng.
 
-### Observability plane: UDP and WebSocket
+### 3.2 Observability plane: UDP/WebSocket
 
-The C++ broadcaster sends metrics approximately every 500 ms. A lost metrics
-packet is acceptable because the next packet supersedes it. Browsers cannot
-open UDP sockets, so `bridge.cjs` translates UDP datagrams into WebSocket
-messages.
+C++ core gửi telemetry khoảng mỗi 500 ms. Mất một gói UDP không ảnh hưởng đúng đắn vì gói tiếp theo sẽ thay thế.
 
 ```mermaid
 sequenceDiagram
     participant C as C++ core
     participant B as bridge.cjs
-    participant U as Browser
+    participant U as Trình duyệt
 
-    loop every configured interval
+    loop theo interval cấu hình
         C-->>B: UDP metrics JSON
         B-->>U: WebSocket message
     end
 ```
 
-The bridge is currently a host process, not part of the frontend container.
+Bridge hiện chạy trên host Windows, không nằm trong frontend container.
 
-## C++ core decomposition
+---
+
+## 4. Phân Rã C++ Core
 
 ```mermaid
 flowchart TB
-    API["API Gateway"]
+    API["HttpGateway"]
     Session["SessionContext"]
     Engine["TilingEngine"]
     Queue["TileQueue"]
@@ -116,84 +113,88 @@ flowchart TB
     Pool --> Metrics
 ```
 
-The core uses dependency direction rather than inheritance-heavy orchestration:
+Nguyên tắc tách module:
 
-- `main.cpp` owns the application lifecycle and wires callbacks.
-- `HttpGateway` knows callback interfaces, not database or pipeline details.
-- `ThreadPool` knows only a `WorkerFn`, not ONNX or GDAL.
-- AI backends implement `AIInterface` and return the shared `Detection` type.
-- `CoordinateMapper` depends on GDAL metadata, not on a specific model.
-- `PostGISClient` receives final `GeoDetection` values.
+- `main.cpp` là composition root, chịu trách nhiệm nối các module.
+- `HttpGateway` chỉ biết callback, không biết chi tiết database/pipeline.
+- `ThreadPool` chỉ biết `WorkerFn`, không phụ thuộc ONNX hoặc GDAL.
+- Các backend AI cùng implement `AIInterface`.
+- `CoordinateMapper` phụ thuộc metadata GDAL, không phụ thuộc model cụ thể.
+- `PostGISClient` nhận kết quả cuối dạng `GeoDetection`.
 
-This separation is why MockAI, YOLO, DOTA OBB, and SegFormer can share the same
-tiling and worker infrastructure.
+Nhờ vậy MockAI, YOLO, DOTA OBB và SegFormer dùng chung hạ tầng tiling/worker/mapping.
 
-## Session ownership
+---
 
-`SessionManager` owns a `shared_ptr<SessionContext>` for every uploaded session.
-The context contains:
+## 5. Quyền Sở Hữu Session
 
-| Field | Meaning | Synchronization |
+`SessionManager` giữ `shared_ptr<SessionContext>` cho từng session.
+
+| Trường | Ý nghĩa | Đồng bộ |
 | --- | --- | --- |
-| `config` | Tile and inference settings | `ctx->mutex` |
-| `filepath` | Uploaded file path | Effectively immutable after upload |
+| `config` | Cấu hình tile, model, worker, confidence | `ctx->mutex` |
+| `filepath` | Đường dẫn file upload | Gần như immutable sau upload |
 | `info` | State, progress, footprint, error message | `ctx->mutex` |
-| `cancel_requested` | Cooperative cancellation flag | `std::atomic<bool>` |
-| `pool` | Worker pool for the active run | `ctx->mutex` during publication/access |
+| `cancel_requested` | Cờ cancel hợp tác | `std::atomic<bool>` |
+| `pool` | Worker pool của lần chạy hiện tại | `ctx->mutex` khi publish/read |
 
-The asynchronous pipeline captures the shared context, so it stays alive until
-the detached pipeline thread exits even if the HTTP request has completed.
+Thread pipeline capture `shared_ptr`, nên context còn sống cho đến khi pipeline kết thúc, dù HTTP request đã trả response.
 
-## Data ownership through the pipeline
+---
+
+## 6. Quyền Sở Hữu Dữ Liệu
 
 ```mermaid
 flowchart TB
-    Disk["GeoTIFF on disk"]
+    Disk["GeoTIFF trên disk"]
     Tile["TileData<br/>owned pixel vector"]
-    Queue["TileQueue<br/>moves TileData"]
-    Worker["Worker-local TileData"]
-    Det["vector of Detection"]
-    Geo["shared GeoDetection vector"]
-    Final["NMS output vector"]
+    Queue["TileQueue<br/>move TileData"]
+    Worker["TileData local của worker"]
+    Det["vector<Detection>"]
+    Geo["all_geo_dets<br/>vector<GeoDetection>"]
+    Final["final_dets sau NMS"]
     DB[("PostGIS rows")]
 
     Disk --> Tile --> Queue --> Worker --> Det --> Geo --> Final --> DB
 ```
 
-Large pixel buffers are moved into and out of the queue. They are destroyed
-after each worker callback returns. Geospatial results are smaller but remain in
-`all_geo_dets` until the fan-in point because the current stitcher needs a global
-view.
+- Pixel buffer lớn được move qua queue, không copy qua từng boundary.
+- Một `TileData` chỉ thuộc về một worker tại một thời điểm.
+- `Detection` là kết quả pixel-space của AI.
+- `GeoDetection` là kết quả sau khi map sang WGS84.
+- `all_geo_dets` giữ toàn bộ kết quả đến điểm fan-in vì stitcher cần nhìn toàn cục.
 
-## Persistence model
+---
 
-PostGIS contains two tables:
+## 7. Mô Hình Lưu Trữ
 
-- `sessions`: filename, state, progress, and timestamps;
-- `detections`: session foreign key, EPSG:4326 polygon, class, and confidence.
+PostGIS có hai bảng chính:
 
-The geometry and session indexes serve different query patterns:
+- `sessions`: filename, status, progress và timestamps.
+- `detections`: session id, polygon EPSG:4326, class id và confidence.
 
-- GiST on `geom` supports spatial predicates;
-- B-tree on `session_id` supports result retrieval per pipeline run.
+Index:
 
-The image footprint currently lives in `SessionInfo` memory and is returned by
-the status API. It is passed to the result query for land-cover coverage but is
-not persisted in the `sessions` table.
+- GiST trên `geom` để hỗ trợ truy vấn không gian.
+- B-tree trên `session_id` để lấy kết quả theo session.
 
-## Deployment topology
+`postgis_data` là Docker volume persist toàn bộ database PostgreSQL/PostGIS. Nó không lưu trực tiếp `vector<GeoDetection>` C++, mà lưu các row sau khi C++ serialize polygon thành WKT và insert vào bảng `detections`.
+
+---
+
+## 8. Topology Docker
 
 ```mermaid
 flowchart TB
-    subgraph Host["Developer host"]
-        Browser["Browser :5173 or :3000"]
-        Bridge["bridge.cjs :9090 UDP / :9091 WS"]
+    subgraph Host["Máy Windows developer"]
+        Browser["Trình duyệt :5173 hoặc :3000"]
+        Bridge["bridge.cjs<br/>UDP :9090 / WS :9091"]
     end
 
     subgraph Compose["Docker Compose network"]
         Core["cpp-core :8080"]
         DB["postgis :5432"]
-        Volume["session_storage volume"]
+        Volume["session_storage<br/>/tmp/sessions"]
         Core --> DB
         Core --> Volume
     end
@@ -203,50 +204,41 @@ flowchart TB
     Bridge -.-> Browser
 ```
 
-`cpp-core` uses a multi-stage GDAL image. The builder installs CMake, libpqxx,
-and ONNX Runtime; the runtime stage contains only the executable, required
-shared libraries, and model directory.
+`session_storage` là Docker named volume mount vào `cpp-core` tại `/tmp/sessions`. Vì vậy file upload không xuất hiện trực tiếp trong thư mục project Windows trừ khi đổi sang bind mount.
 
-## Source-code map
+---
 
-Start reading in this order:
+## 9. Thứ Tự Đọc Source Code
 
-1. [`common/types.hpp`](../cpp-core/src/common/types.hpp): values crossing module
-   boundaries.
-2. [`main.cpp`](../cpp-core/src/main.cpp): dependency wiring and session flow.
-3. [`tiling_engine.cpp`](../cpp-core/src/pipeline/tiling_engine.cpp): disk-windowed
-   raster reads.
-4. [`tile_queue.hpp`](../cpp-core/src/pipeline/tile_queue.hpp): bounded blocking
-   queue.
-5. [`thread_pool.cpp`](../cpp-core/src/pipeline/thread_pool.cpp): worker lifetime.
-6. [`ai_interface.hpp`](../cpp-core/src/inference/ai_interface.hpp): inference
-   contract.
-7. [`coordinate_mapper.cpp`](../cpp-core/src/pipeline/coordinate_mapper.cpp):
-   pixel-to-world conversion.
-8. [`stitcher.cpp`](../cpp-core/src/stitching/stitcher.cpp): global NMS.
-9. [`postgis_client.cpp`](../cpp-core/src/database/postgis_client.cpp): persistence,
-   GeoJSON, and coverage SQL.
+Nên đọc theo thứ tự:
+
+1. [`common/types.hpp`](../cpp-core/src/common/types.hpp): các struct dùng xuyên module.
+2. [`main.cpp`](../cpp-core/src/main.cpp): wiring, session flow, `runPipelineAsync()`.
+3. [`tiling_engine.cpp`](../cpp-core/src/pipeline/tiling_engine.cpp): đọc raster theo window.
+4. [`tile_queue.hpp`](../cpp-core/src/pipeline/tile_queue.hpp): bounded blocking queue.
+5. [`thread_pool.cpp`](../cpp-core/src/pipeline/thread_pool.cpp): vòng đời worker.
+6. [`ai_interface.hpp`](../cpp-core/src/inference/ai_interface.hpp): contract AI.
+7. [`coordinate_mapper.cpp`](../cpp-core/src/pipeline/coordinate_mapper.cpp): pixel -> WGS84.
+8. [`stitcher.cpp`](../cpp-core/src/stitching/stitcher.cpp): NMS toàn cục.
+9. [`postgis_client.cpp`](../cpp-core/src/database/postgis_client.cpp): insert, GeoJSON, coverage.
 10. [`http_gateway.cpp`](../cpp-core/src/api/http_gateway.cpp): external API.
 
-## Architectural tradeoffs
+---
 
-### Chosen intentionally
+## 10. Trade-off Kiến Trúc
 
-- Disk-windowed GDAL I/O instead of whole-image decoding.
-- Bounded queues instead of maximum producer throughput.
-- One ONNX session per available AI slot instead of concurrent calls into one
-  unprotected session.
-- HTTP polling for durable session progress and UDP for transient telemetry.
-- PostGIS geography area for coverage instead of browser degree-based area.
+### Chủ động lựa chọn
 
-### Current compromises
+- GDAL windowed I/O thay vì decode toàn ảnh.
+- Bounded queue thay vì producer chạy tối đa.
+- Nhiều ONNX session độc lập thay vì gọi đồng thời vào một session không bảo vệ.
+- HTTP cho điều khiển tin cậy, UDP cho telemetry tạm thời.
+- PostGIS geography area cho coverage thay vì tính diện tích theo độ lon/lat trong browser.
 
-- The pipeline is asynchronous but remains inside one process and one machine.
-- Stitching waits for all workers and runs on one thread.
-- Results accumulate in memory before one database transaction.
-- The state-machine class is tested but runtime state assignments still happen
-  directly in `main.cpp`.
-- Coverage resolves conflicts for statistics without modifying stored polygons.
+### Thỏa hiệp hiện tại
 
-These are implementation facts, not hidden guarantees. They define the most
-valuable directions for a future production version.
+- Pipeline bất đồng bộ nhưng vẫn nằm trong một process/một máy.
+- Stitching chờ toàn bộ worker và chạy một thread.
+- Kết quả được gom trong RAM trước khi insert database.
+- `StateMachine` đã có test nhưng runtime chưa đi qua một transition gate duy nhất.
+- Coverage resolve overlap cho thống kê, không sửa lại polygon đã lưu.
