@@ -8,28 +8,28 @@ Tài liệu này đi theo một session từ lúc upload GeoTIFF đến lúc fro
 
 ```mermaid
 sequenceDiagram
-    participant UI as Client frontend
+    participant UI as Frontend client
     participant API as HttpGateway
-    participant P as Thread pipeline
+    participant P as Pipeline thread
     participant G as GDAL producer
-    participant W as Pool worker
+    participant W as Worker pool
     participant DB as PostGIS
 
     UI->>API: POST /upload
-    API->>DB: tạo session
-    API->>API: stream input.tif vào vùng lưu session
+    API->>DB: create session
+    API->>API: stream input.tif to session storage
     UI->>API: POST /config
     UI->>API: POST /start
     API-->>UI: 202 Accepted
     API->>P: runPipelineAsync(ctx)
-    P->>G: mở metadata + grid
-    loop từng raster window
+    P->>G: open metadata + grid
+    loop each raster window
         G->>W: submit TileData
         W->>W: infer + map geometry
     end
     P->>W: close queue + join
-    P->>P: NMS toàn cục
-    P->>DB: insert polygon cuối
+    P->>P: global NMS
+    P->>DB: insert final polygons
     P->>DB: set DONE
     UI->>API: GET /results
     API->>DB: GeoJSON + coverage query
@@ -285,12 +285,12 @@ Frontend dùng GeoJSON để vẽ polygon và dùng `coverage` để hiển th�
 ```mermaid
 flowchart TB
     Run["runPipelineAsync"]
-    FileError["Lỗi file/GDAL"]
-    WorkerError["Lỗi worker"]
-    Cancel["Yêu cầu cancel"]
-    DBError["Lỗi insert database"]
-    Error["Đặt ERROR + dừng"]
-    Done["Đặt DONE"]
+    FileError["File/GDAL error"]
+    WorkerError["Worker exception"]
+    Cancel["Cancel request"]
+    DBError["Insert failure"]
+    Error["Set ERROR + stop"]
+    Done["Set DONE"]
 
     Run --> FileError --> Error
     Run --> WorkerError --> Error

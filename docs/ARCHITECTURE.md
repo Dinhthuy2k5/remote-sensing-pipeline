@@ -23,16 +23,16 @@ Hệ thống hiện là một core service module hóa, chạy trong Docker Comp
 
 ```mermaid
 flowchart TB
-    User["Người dùng"]
+    User["User"]
     UI["React dashboard<br/>MapLibre + Recharts"]
     Core["C++ core service"]
     DB[("PostGIS")]
-    Files[("volume session_storage")]
+    Files[("session_storage volume")]
     Bridge["Node.js telemetry bridge"]
 
     User --> UI
     UI -->|"HTTP"| Core
-    Core -->|"stream GeoTIFF + GDAL đọc window"| Files
+    Core -->|"stream GeoTIFF + GDAL window reads"| Files
     Core -->|"sessions + polygons"| DB
     Core -. "UDP :9090" .-> Bridge
     Bridge -. "WebSocket :9091" .-> UI
@@ -74,9 +74,9 @@ C++ core gửi telemetry khoảng mỗi 500 ms. Mất một gói UDP không ản
 sequenceDiagram
     participant C as C++ core
     participant B as bridge.cjs
-    participant U as Trình duyệt
+    participant U as Browser
 
-    loop theo interval cấu hình
+    loop configured interval
         C-->>B: UDP metrics JSON
         B-->>U: WebSocket message
     end
@@ -146,13 +146,13 @@ Thread pipeline capture `shared_ptr`, nên context còn sống cho đến khi pi
 
 ```mermaid
 flowchart TB
-    Disk["GeoTIFF trên disk"]
+    Disk["GeoTIFF on disk"]
     Tile["TileData<br/>owned pixel vector"]
     Queue["TileQueue<br/>move TileData"]
-    Worker["TileData local của worker"]
+    Worker["Worker-local TileData"]
     Det["vector<Detection>"]
     Geo["all_geo_dets<br/>vector<GeoDetection>"]
-    Final["final_dets sau NMS"]
+    Final["final_dets after NMS"]
     DB[("PostGIS rows")]
 
     Disk --> Tile --> Queue --> Worker --> Det --> Geo --> Final --> DB
@@ -186,8 +186,8 @@ Index:
 
 ```mermaid
 flowchart TB
-    subgraph Host["Máy Windows developer"]
-        Browser["Trình duyệt :5173 hoặc :3000"]
+    subgraph Host["Windows developer host"]
+        Browser["Browser :5173 or :3000"]
         Bridge["bridge.cjs<br/>UDP :9090 / WS :9091"]
     end
 

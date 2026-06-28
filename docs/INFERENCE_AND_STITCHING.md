@@ -226,12 +226,12 @@ SQL pipeline:
 
 ```mermaid
 flowchart TB
-    Stored["Polygon đã lưu"]
-    Clip["Cắt theo footprint"]
-    Union["Hợp nhất theo class"]
-    Resolve["Trừ overlap của class ưu tiên cao hơn"]
-    Area["ST_Area trên geography"]
-    Percent["Phần trăm coverage"]
+    Stored["Stored polygons"]
+    Clip["Clip to footprint"]
+    Union["Union by class"]
+    Resolve["Remove overlap by priority"]
+    Area["ST_Area on geography"]
+    Percent["Coverage percentages"]
 
     Stored --> Clip --> Union --> Resolve --> Area --> Percent
 ```

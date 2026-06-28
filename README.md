@@ -48,14 +48,14 @@ Các backend AI hiện có: MockAI, YOLOv8n-seg COCO, YOLO11n-OBB DOTA và SegFo
 
 ```mermaid
 flowchart TB
-    UI["Dashboard trên trình duyệt<br/>React + MapLibre"]
+    UI["Browser dashboard<br/>React + MapLibre"]
     Core["C++ core<br/>HTTP API + processing pipeline"]
     DB[("PostGIS<br/>sessions + detections")]
     Files[("session_storage<br/>/tmp/sessions/{id}/input.tif")]
     Bridge["Telemetry bridge<br/>UDP -> WebSocket"]
 
     UI -->|"HTTP: upload / config / start / results"| Core
-    Core -->|"stream upload + GDAL đọc window"| Files
+    Core -->|"stream upload + GDAL window reads"| Files
     Core -->|"SQL + WKT polygons"| DB
     Core -. "UDP metrics" .-> Bridge
     Bridge -. "WebSocket metrics" .-> UI
@@ -65,14 +65,14 @@ Trong `cpp-core`, pipeline dùng mô hình producer-consumer:
 
 ```mermaid
 flowchart TB
-    Upload["GeoTIFF trong vùng lưu session"]
+    Upload["GeoTIFF in session storage"]
     Tiler["TilingEngine<br/>GDAL RasterIO"]
     Queue["Bounded TileQueue<br/>capacity = workers x 2"]
-    Workers["Các worker trong ThreadPool"]
+    Workers["ThreadPool workers"]
     Infer["MockAI / ONNX inference"]
     Map["CoordinateMapper<br/>Pixel -> WGS84"]
     NMS["Stitcher<br/>class-aware NMS"]
-    Save["PostGISClient<br/>insert bằng transaction"]
+    Save["PostGISClient<br/>transactional insert"]
 
     Upload --> Tiler --> Queue --> Workers
     Workers --> Infer --> Map --> NMS --> Save

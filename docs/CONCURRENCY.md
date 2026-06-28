@@ -9,8 +9,8 @@ Tài liệu này giải thích các thread trong hệ thống, cách chúng giao
 ```mermaid
 flowchart TB
     HTTP["HTTP server threads"]
-    Pipeline["Detached pipeline thread<br/>mỗi session start"]
-    Producer["GDAL producer<br/>chạy trên pipeline thread"]
+    Pipeline["Detached pipeline thread<br/>per session start"]
+    Producer["GDAL producer<br/>runs on pipeline thread"]
     Queue["Bounded TileQueue"]
     W1["Worker 0"]
     W2["Worker 1"]
@@ -22,7 +22,7 @@ flowchart TB
     Queue --> W1
     Queue --> W2
     Queue --> WN
-    UDP -. "đọc metrics có bảo vệ" .-> Pipeline
+    UDP -. "protected metrics read" .-> Pipeline
 ```
 
 Không có tiling thread riêng. Thread pipeline chính là producer. Đa luồng bắt đầu khi `ThreadPool::start()` tạo worker trước khi `iterateTiles()` sinh tile.
