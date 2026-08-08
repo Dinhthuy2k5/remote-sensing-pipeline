@@ -35,7 +35,7 @@ export function useTelemetry() {
                             ? next.slice(-MAX_HISTORY)
                             : next;
                     });
-                } catch (_) { }
+                } catch (err) { console.warn('Telemetry parse failed:', err); }
             };
 
             ws.onclose = () => {

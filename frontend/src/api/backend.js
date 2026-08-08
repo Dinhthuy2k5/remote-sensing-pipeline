@@ -8,7 +8,7 @@ async function jsonOrThrow(response) {
     return data;
 }
 
-export async function uploadFile(file, onProgress) {
+export async function uploadFile(file) {
     // Streaming upload — raw binary
     return fetch(`${BASE}/upload`, {
         method: "POST",
