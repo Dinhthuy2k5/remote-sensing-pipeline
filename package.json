@@ -1,0 +1,29 @@
+{
+  "name": "remote-sensing-pipeline",
+  "version": "1.0.0",
+  "description": "Pipeline C++ để xử lý và phân tích ảnh viễn thám khổ lớn như GeoTIFF từ vệ tinh, UAV hoặc ảnh hàng không. Hệ thống không nạp toàn bộ ảnh vào RAM, mà stream file upload xuống vùng lưu session, đọc ảnh theo tile bằng GDAL, chạy AI inference trên nhiều worker, ánh xạ kết quả từ pixel sang WGS84, lưu polygon vào PostGIS và hiển thị kết quả trên dashboard React/MapLibre.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prepare": "husky"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dinhthuy2k5/remote-sensing-pipeline.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Dinhthuy2k5/remote-sensing-pipeline/issues"
+  },
+  "homepage": "https://github.com/Dinhthuy2k5/remote-sensing-pipeline#readme",
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "init": "^0.1.2",
+    "npx": "^10.2.2"
+  }
+}

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Chỉ lint frontend khi có file JS/TS thay đổi trong staged
+if git diff --cached --name-only | grep -qE '^frontend/.*\.(ts|tsx|js|jsx)$'; then
+  cd frontend && npm run lint
+fi
