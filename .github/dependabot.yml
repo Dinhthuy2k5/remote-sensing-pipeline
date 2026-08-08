@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # npm dependencies trong frontend/
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "frontend"
+
+  # Docker base images (Dockerfile trong cpp-core/, nếu có)
+  - package-ecosystem: "docker"
+    directory: "/cpp-core"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # GitHub Actions dùng trong workflow (actions/checkout, setup-node...)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
