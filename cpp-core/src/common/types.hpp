@@ -80,7 +80,7 @@ namespace rs
     // Bản nâng cấp của Detection. Nó đã chuyển đổi BoundingBox (pixel) thành một mảng gồm 4 điểm GeoPoint
     //  (tạo thành một hình đa giác - Polygon). Cấu trúc này đã sẵn sàng 100% để chuyển thành định dạng GeoJSON nạp vào PostGIS.
     {
-        std::vector<GeoPoint> polygon; // 4 góc bbox → tọa độ thực
+        std::vector<GeoPoint> polygon; // các góc bbox → tọa độ thực
         int class_id;
         float confidence;
         int64_t session_id;

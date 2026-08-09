@@ -17,6 +17,7 @@ data/samples/*.tiff
 volumes/
 
 # Node
+node_modules/
 frontend/node_modules/
 cpp-core/models/*.onnx
 cpp-core/models/*.onnx.data
@@ -25,3 +26,5 @@ cpp-core/models/segformer-loveda-b2/
 cpp-core/models/sentinel2-unet/
 /yolo*.onnx
 /yolo*.pt
+
+report/
