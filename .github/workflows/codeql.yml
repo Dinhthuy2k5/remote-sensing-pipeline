@@ -3,30 +3,27 @@ name: "CodeQL"
 on:
   push:
     branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/codeql.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/codeql.yml"
   schedule:
-    # Chạy định kỳ mỗi thứ Hai, 3:00 sáng UTC, để bắt lỗ hổng mới phát hiện
-    # trong dependency ngay cả khi không có commit mới
+    # Quét định kỳ toàn bộ frontend mỗi thứ Hai, 3:00 sáng UTC,
+    # để bắt lỗ hổng mới phát hiện trong dependency dù không có commit mới
     - cron: '0 3 * * 1'
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: Analyze (javascript-typescript)
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: read
       security-events: write
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - language: c-cpp
-            build-mode: manual
-          - language: javascript-typescript
-            build-mode: none
 
     steps:
       - name: Checkout repository
@@ -35,16 +32,15 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-
-      # C++ cần build-mode "manual" nên phải tự chạy lệnh build để CodeQL
-      # theo dõi quá trình biên dịch và phân tích mã máy sinh ra
-      - name: Build C++ core (manual build mode)
-        if: matrix.language == 'c-cpp'
-        run: docker build --target builder -t rs-pipeline-builder cpp-core
+          languages: javascript-typescript
+          build-mode: none
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:javascript-typescript"
+
+  # C++ tạm thời tắt: CodeQL cần trace trực tiếp lệnh biên dịch trên
+  # runner, nhưng build hiện tại chạy qua "docker build" nên tracer
+  # không theo dõi được -> job luôn fail. Cần build C++ trực tiếp trên
+  # runner (cài GDAL/ONNX Runtime/libpqxx, không qua Docker) mới bật lại được.
