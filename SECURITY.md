@@ -22,4 +22,4 @@ Project đang trong giai đoạn phát triển (đồ án cá nhân), chưa có 
 
 ## Thời gian phản hồi
 
-Đây là project cá nhân nên không cam kết SLA cụ thể, nhưng sẽ cố gắng phản hồi trong vòng vài ngày.
+Đây là project cá nhân nên không cam kết SLA cụ thể, nhưng sẽ cố gắng phản hồi trong vòng 2 ngày.
