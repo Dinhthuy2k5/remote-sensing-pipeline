@@ -425,5 +425,3 @@ Quy trình SQL:
 Project hiện là prototype end-to-end cho bài toán xử lý ảnh viễn thám khổ lớn: đọc ảnh theo tile, xử lý đa luồng có backpressure, tích hợp AI backend thay thế được, chuyển tọa độ sang WGS84, lưu PostGIS, telemetry thời gian thực và trực quan hóa trên bản đồ.
 
 Các hướng phát triển tiếp theo: mask-level stitching, model multispectral, GPU inference, streaming insert vào PostGIS và session scheduler cho môi trường production.
- 
- 
