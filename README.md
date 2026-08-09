@@ -1,4 +1,6 @@
-# Pipeline Xử Lý Ảnh Viễn Thám
+![CI](https://github.com/Dinhthuy2k5/remote-sensing-pipeline/actions/workflows/ci.yml/badge.svg)
+![CodeQL](https://github.com/Dinhthuy2k5/remote-sensing-pipeline/actions/workflows/codeql.yml/badge.svg)
+# Hệ thống Xử Lý Ảnh Viễn Thám
 
 Pipeline C++ để xử lý và phân tích ảnh viễn thám khổ lớn như GeoTIFF từ vệ tinh, UAV hoặc ảnh hàng không. Hệ thống không nạp toàn bộ ảnh vào RAM, mà stream file upload xuống vùng lưu session, đọc ảnh theo tile bằng GDAL, chạy AI inference trên nhiều worker, ánh xạ kết quả từ pixel sang WGS84, lưu polygon vào PostGIS và hiển thị kết quả trên dashboard React/MapLibre.
 
