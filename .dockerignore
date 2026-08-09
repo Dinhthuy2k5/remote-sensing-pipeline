@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+frontend/node_modules
+npm-debug.log
+
+# Env / secrets
+.env
+.env.local
+*.pem
+
+# Build output
+frontend/dist
+cpp-core/build
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs không cần trong image
+docs
+README.md
+CONTRIBUTING.md
