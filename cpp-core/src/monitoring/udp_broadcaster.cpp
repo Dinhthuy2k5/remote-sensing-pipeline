@@ -1,5 +1,6 @@
 #include "monitoring/udp_broadcaster.hpp"
 #include "common/logger.hpp"
+#include "httplib.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
