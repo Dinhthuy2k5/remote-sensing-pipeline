@@ -6,7 +6,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
-
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <chrono>
@@ -129,6 +129,56 @@ namespace rs
         LOG_DEBUG("UdpBroadcaster", "Stopped.");
     }
 
+    void UdpBroadcaster::sendHttp(const std::string &payload)
+    {
+        const char *host = std::getenv("TELEMETRY_HOST");
+
+        if (!host || std::string(host).empty())
+        {
+            return;
+        }
+
+        const char *port_env = std::getenv("TELEMETRY_PORT");
+
+        int port = 10000;
+
+        if (port_env && std::string(port_env).length() > 0)
+        {
+            port = std::stoi(port_env);
+        }
+
+        httplib::Client client(host, port);
+
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(1, 0);
+        client.set_write_timeout(1, 0);
+
+        auto result = client.Post(
+            "/telemetry",
+            payload,
+            "application/json");
+
+        if (!result)
+        {
+            LOG_WARN(
+                "UdpBroadcaster",
+                "Telemetry HTTP failed: " +
+                    httplib::to_string(result.error()));
+
+            return;
+        }
+
+        if (result->status < 200 || result->status >= 300)
+        {
+            LOG_WARN(
+                "UdpBroadcaster",
+                "Telemetry HTTP returned status " +
+                    std::to_string(result->status));
+
+            return;
+        }
+    }
+
     // ─── broadcastLoop ────────────────────────────────────────────
     void UdpBroadcaster::broadcastLoop()
     {
@@ -173,6 +223,8 @@ namespace rs
             std::string payload = metricsToJson(m);
             sendto(sock_fd_, payload.c_str(), payload.size(),
                    0, (struct sockaddr *)&addr, sizeof(addr));
+
+            sendHttp(payload);
 
             LOG_DEBUG("UdpBroadcaster", "Sent: " + payload);
 

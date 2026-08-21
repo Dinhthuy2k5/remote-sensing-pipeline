@@ -58,6 +58,8 @@ namespace rs
 
         // Đọc CPU từ /proc/stat (2 sample, tính delta)
         static float readCpuPercent();
+
+        void sendHttp(const std::string &payload);
     };
 
 } // namespace rs
