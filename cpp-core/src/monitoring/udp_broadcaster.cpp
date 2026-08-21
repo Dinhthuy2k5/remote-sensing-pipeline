@@ -1,6 +1,7 @@
 #include "monitoring/udp_broadcaster.hpp"
 #include "common/logger.hpp"
-#include "httplib.h"
+
+#include "httplib_wrapper.hpp"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -148,7 +149,7 @@ namespace rs
             port = std::stoi(port_env);
         }
 
-        httplib::Client client(host, port);
+        httplib::SSLClient client(host, port);
 
         client.set_connection_timeout(1, 0);
         client.set_read_timeout(1, 0);

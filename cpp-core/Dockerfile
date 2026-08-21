@@ -23,7 +23,10 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
 FROM osgeo/gdal:ubuntu-small-3.6.3
 
 RUN apt-get update && apt-get install -y \
-    libpqxx-6.4 libpq5 libgomp1 \
+    libpqxx-6.4 \
+    libpq5 \
+    libgomp1 \
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy ONNX Runtime .so từ builder
