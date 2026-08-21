@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 
-const WS_URL = "ws://localhost:9091";
+const WS_URL =
+    import.meta.env.VITE_WS_URL ||
+    "ws://localhost:9091";
 const MAX_HISTORY = 60; // giữ 60 data points (~30 giây)
 
 export function useTelemetry() {
